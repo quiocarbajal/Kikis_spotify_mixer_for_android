@@ -14,6 +14,7 @@ import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import com.kiki.spotifymixer.data.remote.SpotifyCloudService
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
+import com.kiki.spotifymixer.service.KikiPlaybackService
 import com.kiki.spotifymixer.ui.navigation.AppScaffold
 import com.kiki.spotifymixer.ui.theme.KikisSpotifyMixerTheme
 import com.kiki.spotifymixer.ui.viewmodel.DiscoverViewModel
@@ -39,6 +40,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        try {
+            Runtime.getRuntime().exec(arrayOf("chmod", "700", applicationInfo.dataDir))
+        } catch (_: Exception) {}
 
         // Initialize Room Database & Repository
         val database = AppDatabase.getInstance(applicationContext)
@@ -170,6 +175,12 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         SpotifyPkceAuthManager.cancel()
+        if (isFinishing) {
+            if (::playerViewModel.isInitialized) {
+                playerViewModel.pausePlayback()
+            }
+            KikiPlaybackService.stop(applicationContext)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -202,7 +213,7 @@ class MainActivity : ComponentActivity() {
     private fun loadInitialLibrary() {
         lifecycleScope.launch(Dispatchers.IO) {
             val seededVersion = repository.getSetting("initial_library_seeded_version")
-            if (seededVersion != "v6") {
+            if (seededVersion != "v7") {
                 try {
                     val jsonString = assets.open("initial_library.json").bufferedReader().use { it.readText() }
                     val json = JSONObject(jsonString)
@@ -300,7 +311,7 @@ class MainActivity : ComponentActivity() {
                     }
                     repository.setPlaylistTracks("all_tracks", allTrackIds)
 
-                    repository.setSetting("initial_library_seeded_version", "v6")
+                    repository.setSetting("initial_library_seeded_version", "v7")
 
                     withContext(Dispatchers.Main) {
                         queueViewModel.loadPlaylistIntoQueue("liked_songs", "Liked Songs")

@@ -57,7 +57,7 @@ class KikiMediaBrowserService : MediaBrowserServiceCompat() {
             )
             setCallback(sessionCallback)
             setSessionToken(sessionToken)
-            isActive = true
+            isActive = false
         }
 
         sessionToken = mediaSession.sessionToken

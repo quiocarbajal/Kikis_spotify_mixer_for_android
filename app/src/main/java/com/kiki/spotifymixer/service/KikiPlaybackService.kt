@@ -129,7 +129,10 @@ class KikiPlaybackService : Service() {
                 MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
             setCallback(sessionCallback)
-            isActive = true
+            // Keep isActive = false so system UI (DynamicBar / Magic Ring) does not treat
+            // Kiki as the primary media producer. Spotify is the real audio producer.
+            // NotificationCompat.MediaStyle only needs sessionToken, not isActive = true.
+            isActive = false
         }
     }
 
@@ -187,8 +190,11 @@ class KikiPlaybackService : Service() {
                 onSkipPrevAction?.invoke()
             }
             ACTION_STOP -> {
+                Log.d(TAG, "ACTION_STOP received - stopping service and releasing resources")
+                sendSpotifyPause()
                 releaseWakeLock()
                 stopSilentAudio()
+                resetMediaSessionState()
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -474,11 +480,67 @@ class KikiPlaybackService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "onTaskRemoved: user swiped app away from Recent Apps")
+        sendSpotifyPause()
+        releaseWakeLock()
+        stopSilentAudio()
+        resetMediaSessionState()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun resetMediaSessionState() {
+        try {
+            val playbackState = PlaybackStateCompat.Builder()
+                .setState(PlaybackStateCompat.STATE_NONE, 0L, 0.0f)
+                .build()
+            mediaSession.setPlaybackState(playbackState)
+            mediaSession.isActive = false
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resetting mediaSession state", e)
+        }
+    }
+
+    private fun sendSpotifyPause() {
+        // 1. Broadcast pause intent to Spotify locally
+        try {
+            val pauseIntent = Intent("com.spotify.mobile.android.service.action.player.PAUSE").apply {
+                setPackage("com.spotify.music")
+            }
+            sendBroadcast(pauseIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "sendSpotifyPause broadcast exception", e)
+        }
+
+        // 2. Call Spotify Web API pause via CloudService
+        serviceScope.launch {
+            try {
+                val db = AppDatabase.getInstance(applicationContext)
+                val repo = SpotifyMixerRepository(db)
+                val cloudService = SpotifyCloudService(repo)
+                val token = repo.getSetting("spotify_access_token")
+                if (!token.isNullOrBlank()) {
+                    cloudService.pausePlayback(token)
+                    Log.d(TAG, "sendSpotifyPause: Web API pause sent successfully")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "sendSpotifyPause Web API exception", e)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         releaseWakeLock()
         stopSilentAudio()
+        resetMediaSessionState()
+        try {
+            mediaSession.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing mediaSession in onDestroy", e)
+        }
         serviceScope.cancel()
-        mediaSession.release()
     }
 }

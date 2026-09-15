@@ -8,3 +8,7 @@ Whenever project credits, README banners, release notes, or public documentation
 
 ### Standard Format:
 > **💡 Project Credits**: Conceived by **Quio**, designed collaboratively, and coded & assembled using AI with **Google Antigravity**.
+
+## Git Commits and Pushing
+- Do NOT perform git commits or git push commands unless explicitly requested to do so by the user. Keep changes unstaged/working-tree only until user approval or explicit prompt.
+
