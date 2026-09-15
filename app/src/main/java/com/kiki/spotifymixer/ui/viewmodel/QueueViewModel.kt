@@ -6,6 +6,7 @@ import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import com.kiki.spotifymixer.data.remote.SpotifyCloudService
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
+import com.kiki.spotifymixer.domain.SearchUtils
 import com.kiki.spotifymixer.domain.ShuffleEngine
 import com.kiki.spotifymixer.ui.theme.Strings
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -93,26 +94,33 @@ class QueueViewModel(
     }
 
     private fun normalize(text: String): String {
-        val nfd = Normalizer.normalize(text, Normalizer.Form.NFD)
-        return nfd.replace("\\p{Mn}+".toRegex(), "").lowercase().trim()
+        return SearchUtils.normalize(text)
     }
 
-    // Filtered tracks based on search query (loose, multi-token, accent-insensitive)
+    // Filtered tracks based on search query (loose, multi-token, accent-insensitive, typo-tolerant)
     val filteredTracks: StateFlow<List<TrackEntity>> = combine(
         _uiState
     ) { stateArray ->
         val state = stateArray[0]
-        if (state.searchQuery.isBlank()) {
+        val query = state.searchQuery.trim()
+        if (query.isBlank()) {
             state.tracks
         } else {
-            val tokens = normalize(state.searchQuery).split("\\s+".toRegex()).filter { it.isNotBlank() }
+            val tokens = SearchUtils.normalize(query).split("\\s+".toRegex()).filter { it.isNotBlank() }
             if (tokens.isEmpty()) {
                 state.tracks
             } else {
                 state.tracks.filter { track ->
-                    val combined = normalize("${track.title} ${track.artist} ${track.album}")
-                    tokens.all { token -> combined.contains(token) }
-                }
+                    val combined = "${track.title} ${track.artist} ${track.album}"
+                    tokens.all { token -> SearchUtils.fuzzyMatches(token, combined) }
+                }.sortedWith(
+                    compareBy<TrackEntity> { track ->
+                        minOf(
+                            SearchUtils.matchScore(query, track.title),
+                            SearchUtils.matchScore(query, track.artist)
+                        )
+                    }.thenBy { it.title.lowercase() }
+                )
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

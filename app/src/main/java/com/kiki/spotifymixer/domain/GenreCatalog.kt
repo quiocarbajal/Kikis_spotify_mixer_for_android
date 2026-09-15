@@ -151,11 +151,18 @@ object GenreCatalog {
     )
 
     fun searchGenres(query: String = "", category: String? = null): List<GenreItem> {
-        val q = query.trim().lowercase()
+        val q = query.trim()
         return ALL_GENRES.filter { item ->
             val matchCategory = category.isNullOrBlank() || category.equals("All", ignoreCase = true) || item.category.equals(category, ignoreCase = true)
-            val matchQuery = q.isEmpty() || item.id.lowercase().contains(q) || item.name.lowercase().contains(q)
+            val matchQuery = q.isEmpty() || SearchUtils.fuzzyMatches(q, item.id) || SearchUtils.fuzzyMatches(q, item.name)
             matchCategory && matchQuery
-        }
+        }.sortedWith(
+            compareBy<GenreItem> { item ->
+                minOf(
+                    SearchUtils.matchScore(q, item.id),
+                    SearchUtils.matchScore(q, item.name)
+                )
+            }.thenBy { it.name.lowercase() }
+        )
     }
 }
