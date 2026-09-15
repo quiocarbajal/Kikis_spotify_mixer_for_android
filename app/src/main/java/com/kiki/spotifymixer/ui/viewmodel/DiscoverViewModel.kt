@@ -7,7 +7,9 @@ import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import com.kiki.spotifymixer.data.remote.SpotifyCloudService
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
 import com.kiki.spotifymixer.domain.GenreCatalog
+import com.kiki.spotifymixer.domain.SearchUtils
 import com.kiki.spotifymixer.domain.ShuffleEngine
+import com.kiki.spotifymixer.ui.theme.Strings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.Normalizer
@@ -22,6 +27,17 @@ import java.text.Normalizer
 enum class ChipModifier {
     INCLUDE, // [+ AND / + Y]
     EXCLUDE  // [- NOT / - NO]
+}
+
+data class ModifierChip(
+    val term: String,
+    val modifier: ChipModifier
+)
+
+enum class RecentlyHeardFilter(val days: Int, val label: String) {
+    NONE(0, "Ninguno"),
+    LAST_7_DAYS(7, "7 días"),
+    LAST_30_DAYS(30, "30 días")
 }
 
 enum class CatalogSearchType {
@@ -43,25 +59,27 @@ data class DiscoverUiState(
     val catalogSearchType: CatalogSearchType = CatalogSearchType.ALL,
     val catalogOperator: SearchLogicOperator = SearchLogicOperator.AND,
     val suggestedCatalogQueries: List<String> = emptyList(),
-    val catalogModifiers: Map<String, ChipModifier> = emptyMap(),
+    val catalogModifiers: Set<ModifierChip> = emptySet(),
     val isSearchingCatalog: Boolean = false,
     val artistInputText: String = "",
     val suggestedArtists: List<String> = emptyList(),
-    val artistModifiers: Map<String, ChipModifier> = emptyMap(),
+    val artistModifiers: Set<ModifierChip> = emptySet(),
     val genreInputText: String = "",
     val suggestedGenres: List<String> = emptyList(),
     val selectedGenreCategory: String = "All",
-    val genreModifiers: Map<String, ChipModifier> = emptyMap(),
+    val genreModifiers: Set<ModifierChip> = emptySet(),
     val trackInputText: String = "",
     val suggestedTracks: List<TrackEntity> = emptyList(),
-    val trackModifiers: Map<String, ChipModifier> = emptyMap(),
+    val trackModifiers: Set<ModifierChip> = emptySet(),
     val selectedDecades: Set<String> = emptySet(),
     val excludeLibrarySongs: Boolean = true,
+    val recentlyHeardFilter: RecentlyHeardFilter = RecentlyHeardFilter.NONE,
     val targetCount: Int = 30, // 30, 50, 75, 100 (matching Mac app)
     val lowPopularityOnly: Boolean = false, // 💎 Hidden Gems switch
     val hiddenGemTarget: String = "artist", // "artist", "track", "both"
     val isGeneratingMix: Boolean = false,
-    val discoveredMix: List<TrackEntity> = emptyList()
+    val discoveredMix: List<TrackEntity> = emptyList(),
+    val infoBannerMessage: String? = null
 )
 
 class DiscoverViewModel(
@@ -73,7 +91,7 @@ class DiscoverViewModel(
     val uiState: StateFlow<DiscoverUiState> = _uiState.asStateFlow()
 
     private val allKnownArtists = listOf(
-        "Soda Stereo", "Gustavo Cerati", "Charly García", "Los Enanitos Verdes", "Luis Alberto Spinetta",
+        "Soda Stereo", "Gustavo Cerati", "Charly García", "León Gieco", "Los Enanitos Verdes", "Luis Alberto Spinetta",
         "Babasónicos", "Fito Páez", "Virus", "Patricio Rey", "Andrés Calamaro", "Los Fabulosos Cadillacs",
         "The Cranberries", "Cranberries", "Daft Punk", "The Weeknd", "M83",
         "Arctic Monkeys", "Queen", "Fleetwood Mac", "Tame Impala", "Gorillaz",
@@ -199,20 +217,28 @@ class DiscoverViewModel(
     }
 
     private var searchJob: Job? = null
+    private var artistJob: Job? = null
+    private var trackJob: Job? = null
+    private var catalogQueryJob: Job? = null
 
     private fun normalize(text: String): String {
-        val nfd = Normalizer.normalize(text, Normalizer.Form.NFD)
-        return nfd.replace("\\p{Mn}+".toRegex(), "").lowercase().trim()
+        return SearchUtils.normalize(text)
     }
 
     private suspend fun getValidAccessToken(): String? {
-        var token = accessToken
-        if (token.isNullOrBlank()) {
-            token = withContext(Dispatchers.IO) { repository.getSetting("spotify_access_token") }
+        val cloudToken = cloudService?.getValidToken(accessToken)
+        if (!cloudToken.isNullOrBlank()) {
+            accessToken = cloudToken
+            return cloudToken
         }
         val refreshToken = withContext(Dispatchers.IO) { repository.getSetting("spotify_refresh_token") }
         val expiresAtStr = withContext(Dispatchers.IO) { repository.getSetting("spotify_token_expires_at") }
         val expiresAt = expiresAtStr?.toLongOrNull() ?: 0L
+        var token = withContext(Dispatchers.IO) { repository.getSetting("spotify_access_token") }
+        if (token.isNullOrBlank()) {
+            token = accessToken
+        }
+
         if (!refreshToken.isNullOrBlank() && (expiresAt == 0L || System.currentTimeMillis() >= (expiresAt - 60_000L))) {
             val refreshResult = withContext(Dispatchers.IO) { SpotifyPkceAuthManager.refreshAccessToken(refreshToken) }
             if (refreshResult.isSuccess) {
@@ -246,17 +272,26 @@ class DiscoverViewModel(
         val trimmed = term.trim()
         if (trimmed.isBlank()) return
         _uiState.update { state ->
-            val updated = state.catalogModifiers.toMutableMap()
-            updated[trimmed] = modifier
+            val updated = state.catalogModifiers.toMutableSet()
+            updated.add(ModifierChip(trimmed, modifier))
             state.copy(catalogModifiers = updated, searchQuery = "")
+        }
+        executeCatalogSearch()
+    }
+
+    fun removeCatalogModifier(chip: ModifierChip) {
+        _uiState.update { state ->
+            val updated = state.catalogModifiers.toMutableSet()
+            updated.remove(chip)
+            state.copy(catalogModifiers = updated)
         }
         executeCatalogSearch()
     }
 
     fun removeCatalogModifier(term: String) {
         _uiState.update { state ->
-            val updated = state.catalogModifiers.toMutableMap()
-            updated.remove(term)
+            val updated = state.catalogModifiers.toMutableSet()
+            updated.removeIf { it.term.equals(term, ignoreCase = true) }
             state.copy(catalogModifiers = updated)
         }
         executeCatalogSearch()
@@ -266,18 +301,28 @@ class DiscoverViewModel(
         _uiState.update { it.copy(searchQuery = query) }
         val trimmed = query.trim()
         if (trimmed.isBlank()) {
+            catalogQueryJob?.cancel()
             _uiState.update { it.copy(suggestedCatalogQueries = emptyList()) }
         } else {
-            val normTrimmed = normalize(trimmed)
-            viewModelScope.launch(Dispatchers.IO) {
+            catalogQueryJob?.cancel()
+            catalogQueryJob = viewModelScope.launch(Dispatchers.IO) {
+                delay(60)
                 val localTracks = repository.getAllTracksSync()
-                val artistMatches = (allKnownArtists + localTracks.map { it.artist })
+                val artistMatches = (allKnownArtists + localTracks.flatMap { SearchUtils.splitArtists(it.artist) })
                     .distinct()
-                    .filter { normalize(it).contains(normTrimmed) }
+                    .filter { SearchUtils.fuzzyMatches(trimmed, it) }
+                    .sortedWith(
+                        compareBy<String> { SearchUtils.matchScore(trimmed, it) }
+                            .thenBy { it.lowercase() }
+                    )
                     .take(4)
                 val trackMatches = (localTracks.map { it.title } + masterCatalog.map { it.title })
                     .distinct()
-                    .filter { normalize(it).contains(normTrimmed) }
+                    .filter { SearchUtils.fuzzyMatches(trimmed, it) }
+                    .sortedWith(
+                        compareBy<String> { SearchUtils.matchScore(trimmed, it) }
+                            .thenBy { it.lowercase() }
+                    )
                     .take(4)
                 val suggestions = (artistMatches + trackMatches).distinct().take(6)
                 withContext(Dispatchers.Main) {
@@ -316,14 +361,42 @@ class DiscoverViewModel(
                         CatalogSearchType.TRACK -> "track:$query"
                         CatalogSearchType.LYRICS -> query
                     }
-                    val cloudResults = cloudService.searchTracks(token, spotifyQuery, limit = 10)
-                    for (t in cloudResults) {
-                        if (seenIds.add(t.id)) {
-                            candidates.add(t)
+                    val queryVariants = mutableListOf(spotifyQuery)
+                    if (state.catalogSearchType == CatalogSearchType.ARTIST) {
+                        queryVariants.add("artist:\"$query\"")
+                        queryVariants.add(query)
+                    }
+                    for (qVar in queryVariants.distinct()) {
+                        for (offset in listOf(0, 10, 20)) {
+                            val cloudResults = cloudService.searchTracks(token, qVar, limit = 10, offset = offset)
+                            for (t in cloudResults) {
+                                if (seenIds.add(t.id)) {
+                                    candidates.add(t)
+                                }
+                            }
+                            if (cloudResults.size < 10) break
                         }
                     }
                 } catch (e: Exception) {
                     android.util.Log.w("DiscoverVM", "Cloud catalog search error", e)
+                }
+            } else if (!token.isNullOrBlank() && cloudService != null && query.isBlank() && modifiers.isNotEmpty()) {
+                try {
+                    for (mod in modifiers) {
+                        if (mod.modifier == ChipModifier.INCLUDE) {
+                            for (offset in listOf(0, 10, 20)) {
+                                val cloudResults = cloudService.searchTracks(token, mod.term, limit = 10, offset = offset)
+                                for (t in cloudResults) {
+                                    if (seenIds.add(t.id)) {
+                                        candidates.add(t)
+                                    }
+                                }
+                                if (cloudResults.size < 10) break
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("DiscoverVM", "Cloud modifier search error", e)
                 }
             }
 
@@ -336,8 +409,7 @@ class DiscoverViewModel(
             }
 
             // 3. Filter candidates based on catalogSearchType, catalogOperator, and catalogModifiers
-            val normQuery = normalize(query)
-            val tokens = normQuery.split("\\s+".toRegex()).filter { it.isNotBlank() }
+            val tokens = SearchUtils.normalize(query).split("\\s+".toRegex()).filter { it.isNotBlank() }
 
             val filtered = candidates.filter { track ->
                 if (tokens.isNotEmpty()) {
@@ -347,29 +419,34 @@ class DiscoverViewModel(
                         CatalogSearchType.TRACK -> track.title
                         CatalogSearchType.LYRICS -> "${track.title} ${track.artist} ${track.album}"
                     }
-                    val normTarget = normalize(targetField)
                     val matches = when (state.catalogOperator) {
-                        SearchLogicOperator.AND -> tokens.all { normTarget.contains(it) }
-                        SearchLogicOperator.OR -> tokens.any { normTarget.contains(it) }
+                        SearchLogicOperator.AND -> tokens.all { token -> SearchUtils.fuzzyMatches(token, targetField) }
+                        SearchLogicOperator.OR -> tokens.any { token -> SearchUtils.fuzzyMatches(token, targetField) }
                     }
                     if (!matches) return@filter false
                 }
 
                 if (modifiers.isNotEmpty()) {
-                    val fullTrackText = normalize("${track.title} ${track.artist} ${track.album}")
-                    for ((modTerm, modType) in modifiers) {
-                        val normMod = normalize(modTerm)
-                        val containsTerm = fullTrackText.contains(normMod)
-                        if (modType == ChipModifier.INCLUDE && !containsTerm) {
+                    val fullTrackText = "${track.title} ${track.artist} ${track.album}"
+                    for (mod in modifiers) {
+                        val containsTerm = SearchUtils.fuzzyMatches(mod.term, fullTrackText)
+                        if (mod.modifier == ChipModifier.INCLUDE && !containsTerm) {
                             return@filter false
                         }
-                        if (modType == ChipModifier.EXCLUDE && containsTerm) {
+                        if (mod.modifier == ChipModifier.EXCLUDE && containsTerm) {
                             return@filter false
                         }
                     }
                 }
                 true
-            }
+            }.sortedWith(
+                compareBy<TrackEntity> { track ->
+                    minOf(
+                        SearchUtils.matchScore(query, track.title),
+                        SearchUtils.matchScore(query, track.artist)
+                    )
+                }.thenBy { it.title.lowercase() }
+            )
 
             _uiState.update { it.copy(searchResults = filtered, isSearchingCatalog = false) }
         }
@@ -377,19 +454,32 @@ class DiscoverViewModel(
 
     fun setArtistInputText(text: String) {
         _uiState.update { it.copy(artistInputText = text) }
-        val trimmed = text.trim().lowercase()
+        val trimmed = text.trim()
         if (trimmed.isEmpty()) {
+            artistJob?.cancel()
             _uiState.update { it.copy(suggestedArtists = emptyList()) }
             return
         }
-        viewModelScope.launch(Dispatchers.IO) {
+        artistJob?.cancel()
+        artistJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(60)
             val localArtists = repository.getAllTracksSync()
-                .map { it.artist }
-                .filter { it.lowercase().contains(trimmed) }
+                .flatMap { SearchUtils.splitArtists(it.artist) }
+                .filter { SearchUtils.fuzzyMatches(trimmed, it) }
                 .distinct()
-            val catalogArtists = allKnownArtists.filter { it.lowercase().contains(trimmed) }
-            val combined = (catalogArtists + localArtists).distinct().take(8)
+            val catalogArtists = allKnownArtists
+                .flatMap { SearchUtils.splitArtists(it) }
+                .filter { SearchUtils.fuzzyMatches(trimmed, it) }
+                .distinct()
+            val combined = (catalogArtists + localArtists)
+                .distinct()
+                .sortedWith(
+                    compareBy<String> { SearchUtils.matchScore(trimmed, it) }
+                        .thenBy { it.lowercase() }
+                )
+                .take(10)
             withContext(Dispatchers.Main) {
+                android.util.Log.d("DiscoverVM", "setArtistInputText: trimmed='$trimmed', found=${combined.size}: $combined")
                 _uiState.update { it.copy(suggestedArtists = combined) }
             }
         }
@@ -399,16 +489,24 @@ class DiscoverViewModel(
         val trimmed = artist.trim()
         if (trimmed.isBlank()) return
         _uiState.update { state ->
-            val updated = state.artistModifiers.toMutableMap()
-            updated[trimmed] = modifier
+            val updated = state.artistModifiers.toMutableSet()
+            updated.add(ModifierChip(trimmed, modifier))
             state.copy(artistModifiers = updated, artistInputText = "", suggestedArtists = emptyList())
+        }
+    }
+
+    fun removeArtistModifier(chip: ModifierChip) {
+        _uiState.update { state ->
+            val updated = state.artistModifiers.toMutableSet()
+            updated.remove(chip)
+            state.copy(artistModifiers = updated)
         }
     }
 
     fun removeArtistModifier(artist: String) {
         _uiState.update { state ->
-            val updated = state.artistModifiers.toMutableMap()
-            updated.remove(artist)
+            val updated = state.artistModifiers.toMutableSet()
+            updated.removeIf { it.term.equals(artist, ignoreCase = true) }
             state.copy(artistModifiers = updated)
         }
     }
@@ -431,16 +529,24 @@ class DiscoverViewModel(
         val trimmed = genre.trim()
         if (trimmed.isBlank()) return
         _uiState.update { state ->
-            val updated = state.genreModifiers.toMutableMap()
-            updated[trimmed] = modifier
+            val updated = state.genreModifiers.toMutableSet()
+            updated.add(ModifierChip(trimmed, modifier))
             state.copy(genreModifiers = updated, genreInputText = "", suggestedGenres = emptyList())
+        }
+    }
+
+    fun removeGenreModifier(chip: ModifierChip) {
+        _uiState.update { state ->
+            val updated = state.genreModifiers.toMutableSet()
+            updated.remove(chip)
+            state.copy(genreModifiers = updated)
         }
     }
 
     fun removeGenreModifier(genre: String) {
         _uiState.update { state ->
-            val updated = state.genreModifiers.toMutableMap()
-            updated.remove(genre)
+            val updated = state.genreModifiers.toMutableSet()
+            updated.removeIf { it.term.equals(genre, ignoreCase = true) }
             state.copy(genreModifiers = updated)
         }
     }
@@ -449,19 +555,32 @@ class DiscoverViewModel(
 
     fun setTrackInputText(text: String) {
         _uiState.update { it.copy(trackInputText = text) }
-        val trimmed = text.trim().lowercase()
+        val trimmed = text.trim()
         if (trimmed.isEmpty()) {
+            trackJob?.cancel()
             _uiState.update { it.copy(suggestedTracks = emptyList()) }
             return
         }
-        viewModelScope.launch(Dispatchers.IO) {
+        trackJob?.cancel()
+        trackJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(60)
             val localMatches = repository.getAllTracksSync().filter {
-                it.title.lowercase().contains(trimmed) || it.artist.lowercase().contains(trimmed)
-            }.take(6)
+                SearchUtils.fuzzyMatches(trimmed, it.title) || SearchUtils.fuzzyMatches(trimmed, it.artist)
+            }
             val catalogMatches = masterCatalog.filter {
-                it.title.lowercase().contains(trimmed) || it.artist.lowercase().contains(trimmed)
-            }.take(6)
-            val combined = (localMatches + catalogMatches).distinctBy { "${it.title.lowercase()}-${it.artist.lowercase()}" }.take(6)
+                SearchUtils.fuzzyMatches(trimmed, it.title) || SearchUtils.fuzzyMatches(trimmed, it.artist)
+            }
+            val combined = (localMatches + catalogMatches)
+                .distinctBy { "${SearchUtils.normalize(it.title)}-${SearchUtils.normalize(it.artist)}" }
+                .sortedWith(
+                    compareBy<TrackEntity> { track ->
+                        minOf(
+                            SearchUtils.matchScore(trimmed, track.title),
+                            SearchUtils.matchScore(trimmed, track.artist)
+                        )
+                    }.thenBy { it.title.lowercase() }
+                )
+                .take(8)
             withContext(Dispatchers.Main) {
                 _uiState.update { it.copy(suggestedTracks = combined) }
             }
@@ -472,16 +591,24 @@ class DiscoverViewModel(
         val trimmed = trackName.trim()
         if (trimmed.isBlank()) return
         _uiState.update { state ->
-            val updated = state.trackModifiers.toMutableMap()
-            updated[trimmed] = modifier
+            val updated = state.trackModifiers.toMutableSet()
+            updated.add(ModifierChip(trimmed, modifier))
             state.copy(trackModifiers = updated, trackInputText = "", suggestedTracks = emptyList())
+        }
+    }
+
+    fun removeTrackModifier(chip: ModifierChip) {
+        _uiState.update { state ->
+            val updated = state.trackModifiers.toMutableSet()
+            updated.remove(chip)
+            state.copy(trackModifiers = updated)
         }
     }
 
     fun removeTrackModifier(trackName: String) {
         _uiState.update { state ->
-            val updated = state.trackModifiers.toMutableMap()
-            updated.remove(trackName)
+            val updated = state.trackModifiers.toMutableSet()
+            updated.removeIf { it.term.equals(trackName, ignoreCase = true) }
             state.copy(trackModifiers = updated)
         }
     }
@@ -507,12 +634,16 @@ class DiscoverViewModel(
 
     fun toggleGenreModifier(genre: String) {
         _uiState.update { state ->
-            val current = state.genreModifiers[genre]
-            val updated = state.genreModifiers.toMutableMap()
-            when (current) {
-                null -> updated[genre] = ChipModifier.INCLUDE
-                ChipModifier.INCLUDE -> updated[genre] = ChipModifier.EXCLUDE
-                ChipModifier.EXCLUDE -> updated.remove(genre)
+            val updated = state.genreModifiers.toMutableSet()
+            val hasInclude = updated.any { it.term.equals(genre, ignoreCase = true) && it.modifier == ChipModifier.INCLUDE }
+            val hasExclude = updated.any { it.term.equals(genre, ignoreCase = true) && it.modifier == ChipModifier.EXCLUDE }
+            if (!hasInclude && !hasExclude) {
+                updated.add(ModifierChip(genre, ChipModifier.INCLUDE))
+            } else if (hasInclude && !hasExclude) {
+                updated.removeIf { it.term.equals(genre, ignoreCase = true) }
+                updated.add(ModifierChip(genre, ChipModifier.EXCLUDE))
+            } else {
+                updated.removeIf { it.term.equals(genre, ignoreCase = true) }
             }
             state.copy(genreModifiers = updated)
         }
@@ -540,6 +671,10 @@ class DiscoverViewModel(
         _uiState.update { it.copy(excludeLibrarySongs = exclude) }
     }
 
+    fun setRecentlyHeardFilter(filter: RecentlyHeardFilter) {
+        _uiState.update { it.copy(recentlyHeardFilter = filter) }
+    }
+
     fun setTargetCount(count: Int) {
         _uiState.update { it.copy(targetCount = count) }
     }
@@ -552,149 +687,356 @@ class DiscoverViewModel(
         _uiState.update { it.copy(hiddenGemTarget = target) }
     }
 
+    fun dismissInfoBanner() {
+        _uiState.update { it.copy(infoBannerMessage = null) }
+    }
+
     fun generateDiscoveryMix() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isGeneratingMix = true) }
+            _uiState.update { it.copy(isGeneratingMix = true, infoBannerMessage = null) }
 
             val state = _uiState.value
             val targetCount = state.targetCount
-            var token = getValidAccessToken()
+            val token = getValidAccessToken()
+
+            val includedArtists = state.artistModifiers
+                .filter { it.modifier == ChipModifier.INCLUDE }
+                .map { it.term }
+            val excludedArtists = state.artistModifiers
+                .filter { it.modifier == ChipModifier.EXCLUDE }
+                .map { it.term.lowercase().trim() }
+
+            val includedGenres = state.genreModifiers
+                .filter { it.modifier == ChipModifier.INCLUDE }
+                .map { it.term }
+            val excludedGenres = state.genreModifiers
+                .filter { it.modifier == ChipModifier.EXCLUDE }
+                .map { it.term.lowercase().trim() }
+
+            val includedTracks = state.trackModifiers
+                .filter { it.modifier == ChipModifier.INCLUDE }
+                .map { it.term }
+            val excludedTracks = state.trackModifiers
+                .filter { it.modifier == ChipModifier.EXCLUDE }
+                .map { it.term.lowercase().trim() }
+
+            val hasPositiveSeeds = includedArtists.isNotEmpty() || includedGenres.isNotEmpty() ||
+                    includedTracks.isNotEmpty() || state.selectedDecades.isNotEmpty()
+
+            // Pre-load library tracks and recently heard exclusion sets
+            val libraryTracks = withContext(Dispatchers.IO) { repository.getAllTracksSync() }
+            val libraryTrackIds = if (state.excludeLibrarySongs) {
+                libraryTracks.map { it.id.lowercase().trim() }.toSet()
+            } else emptySet()
+            val libraryKeys = if (state.excludeLibrarySongs) {
+                libraryTracks.map { "${it.title.lowercase().trim()} - ${it.artist.lowercase().trim()}" }.toSet()
+            } else emptySet()
+
+            val recentTrackIds: Set<String> = if (state.recentlyHeardFilter != RecentlyHeardFilter.NONE) {
+                val localRecentIds = withContext(Dispatchers.IO) {
+                    repository.getRecentlyPlayedTrackIds(days = state.recentlyHeardFilter.days)
+                }.toSet()
+                val cloudRecentIds = if (!token.isNullOrBlank() && cloudService != null) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            cloudService.fetchRecentlyPlayedTrackIds(token)
+                        } catch (_: Exception) {
+                            emptySet()
+                        }
+                    }
+                } else emptySet()
+                localRecentIds + cloudRecentIds
+            } else emptySet()
+
+            fun isAllowedCandidate(track: TrackEntity): Boolean {
+                // Strictly enforce valid Spotify track format: must start with spotify:track: and have valid ID length
+                if (!track.uri.startsWith("spotify:track:") || track.id.length < 15) return false
+
+                // Strictly enforce Library Exclusion: zero library tracks admitted when enabled
+                if (state.excludeLibrarySongs) {
+                    val id = track.id.lowercase().trim()
+                    val key = "${track.title.lowercase().trim()} - ${track.artist.lowercase().trim()}"
+                    if (libraryTrackIds.contains(id) || libraryKeys.contains(key)) return false
+                }
+
+                // Strictly enforce Recently Heard Exclusion
+                if (recentTrackIds.contains(track.id)) return false
+
+                // Hard Prune: EXCLUDED artists (- NO)
+                if (excludedArtists.isNotEmpty()) {
+                    if (excludedArtists.any { SearchUtils.fuzzyMatches(it, track.artist) || track.artist.lowercase().contains(it) }) return false
+                }
+
+                // Hard Prune: EXCLUDED genres (- NO)
+                if (excludedGenres.isNotEmpty()) {
+                    if (excludedGenres.any { SearchUtils.fuzzyMatches(it, track.album) || track.album.lowercase().contains(it) }) return false
+                }
+
+                // Hard Prune: EXCLUDED song seeds (- NO)
+                if (excludedTracks.isNotEmpty()) {
+                    if (excludedTracks.any { SearchUtils.fuzzyMatches(it, track.title) || track.title.lowercase().contains(it) }) return false
+                }
+
+                return true
+            }
 
             val candidates = mutableListOf<TrackEntity>()
             val seenKeys = mutableSetOf<String>()
 
-            fun addCandidate(track: TrackEntity) {
-                // Strictly enforce valid Spotify track format: must start with spotify:track: and have valid ID length
-                if (!track.uri.startsWith("spotify:track:") || track.id.length < 15) return
+            fun addCandidate(track: TrackEntity): Boolean {
+                if (!isAllowedCandidate(track)) return false
                 val key = "${track.title.lowercase().trim()} - ${track.artist.lowercase().trim()}"
-                if (!seenKeys.contains(key)) {
-                    seenKeys.add(key)
+                if (seenKeys.add(key)) {
                     candidates.add(track)
+                    return true
+                }
+                return false
+            }
+
+            // A. Local Library Seeding (ONLY when NOT excluding library songs)
+            if (!state.excludeLibrarySongs && hasPositiveSeeds) {
+                for (t in libraryTracks) {
+                    var matchesSeed = false
+                    for (art in includedArtists) {
+                        if (SearchUtils.fuzzyMatches(art, t.artist) || SearchUtils.splitArtists(t.artist).any { SearchUtils.fuzzyMatches(art, it) }) {
+                            matchesSeed = true
+                            break
+                        }
+                    }
+                    if (!matchesSeed) {
+                        for (tr in includedTracks) {
+                            if (SearchUtils.fuzzyMatches(tr, t.title)) {
+                                matchesSeed = true
+                                break
+                            }
+                        }
+                    }
+                    if (!matchesSeed) {
+                        for (gen in includedGenres) {
+                            if (SearchUtils.fuzzyMatches(gen, t.album)) {
+                                matchesSeed = true
+                                break
+                            }
+                        }
+                    }
+                    if (matchesSeed) {
+                        addCandidate(t)
+                    }
                 }
             }
 
-            // 1. If Spotify Web API is available, harvest live candidates matching user's filters
-            if (!token.isNullOrBlank() && cloudService != null) {
-                withContext(Dispatchers.IO) {
-                    val includedArtists = state.artistModifiers
-                        .filter { it.value == ChipModifier.INCLUDE }.keys
-                    for (artist in includedArtists) {
-                        for (page in 0..1) {
-                            val tracks = cloudService.searchTracks(token, "artist:$artist", limit = 10, offset = page * 10)
-                            if (tracks.isNotEmpty()) {
-                                tracks.forEach { addCandidate(it) }
-                            } else {
-                                cloudService.searchTracks(token, artist, limit = 10, offset = page * 10).forEach { addCandidate(it) }
+            // B. Cloud Seeding with Iterative / Recursive Orbit Expansion (Depth 0 -> 1 -> 2)
+            val visitedArtists = mutableSetOf<String>()
+            for (a in excludedArtists) visitedArtists.add(a.lowercase().trim())
+
+            withContext(Dispatchers.IO) {
+                if (!token.isNullOrBlank() && cloudService != null) {
+                    coroutineScope {
+                        // 1. Initial Seeds Harvesting (Depth 0)
+                        val initialJobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+
+                        // Artist Seeds (Depth 0: direct catalog tracks)
+                        for (artist in includedArtists) {
+                            val norm = artist.lowercase().trim()
+                            if (visitedArtists.contains(norm)) continue
+                            visitedArtists.add(norm)
+
+                            for (offset in listOf(0, 10, 20, 30, 40)) {
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, "artist:\"$artist\"", limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                            }
+                            for (offset in listOf(0, 10)) {
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, "artist:$artist", limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, artist, limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
                             }
                         }
-                    }
 
-                    val includedGenres = state.genreModifiers
-                        .filter { it.value == ChipModifier.INCLUDE }.keys
-                    for (genre in includedGenres) {
-                        for (page in 0..1) {
-                            val tracks = cloudService.searchTracks(token, "genre:$genre", limit = 10, offset = page * 10)
-                            if (tracks.isNotEmpty()) {
-                                tracks.forEach { addCandidate(it) }
-                            } else {
-                                cloudService.searchTracks(token, genre, limit = 10, offset = page * 10).forEach { addCandidate(it) }
+                        // Genre Seeds
+                        for (genre in includedGenres) {
+                            for (offset in listOf(0, 10, 20)) {
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, "genre:\"$genre\"", limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                            }
+                            for (offset in listOf(0, 10)) {
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, genre, limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
                             }
                         }
-                    }
 
-                    // Harvest live candidates matching included song seeds (Canción Similar)
-                    val includedTracks = state.trackModifiers
-                        .filter { it.value == ChipModifier.INCLUDE }.keys
-                    for (trackSeed in includedTracks) {
-                        for (page in 0..1) {
-                            val tracks = cloudService.searchTracks(token, trackSeed, limit = 10, offset = page * 10)
-                            tracks.forEach { addCandidate(it) }
+                        // Song Seeds
+                        for (trackSeed in includedTracks) {
+                            for (offset in listOf(0, 10)) {
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, trackSeed, limit = 10, offset = offset)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                            }
                         }
-                    }
 
-                    val decadeQueryMap = mapOf(
-                        "60s" to "year:1960-1969",
-                        "70s" to "year:1970-1979",
-                        "80s" to "year:1980-1989",
-                        "90s" to "year:1990-1999",
-                        "00s" to "year:2000-2009",
-                        "10s" to "year:2010-2019"
-                    )
-                    for (dec in state.selectedDecades) {
-                        val q = decadeQueryMap[dec] ?: "year:1980-1999"
-                        for (page in 0..1) {
-                            val tracks = cloudService.searchTracks(token, q, limit = 10, offset = page * 10)
-                            tracks.forEach { addCandidate(it) }
-                        }
-                    }
-
-                    // If no positive filters were specified, automatically harvest diverse live seeds
-                    if (includedArtists.isEmpty() && includedGenres.isEmpty() && includedTracks.isEmpty() && state.selectedDecades.isEmpty()) {
-                        val discoveryQueries = listOf(
-                            "rock", "indie", "alternative", "synth-pop",
-                            "latin rock", "classic rock", "pop", "disco", "year:1990-2023"
-                        ).shuffled().take(6)
-                        for (q in discoveryQueries) {
-                            val randomOffset = (0..3).random() * 10
+                        // Decade Seeds
+                        val decadeQueryMap = mapOf(
+                            "60s" to "year:1960-1969",
+                            "70s" to "year:1970-1979",
+                            "80s" to "year:1980-1989",
+                            "90s" to "year:1990-1999",
+                            "00s" to "year:2000-2009",
+                            "10s" to "year:2010-2019"
+                        )
+                        for (dec in state.selectedDecades) {
+                            val q = decadeQueryMap[dec] ?: "year:1980-1999"
                             for (page in 0..1) {
-                                val tracks = cloudService.searchTracks(token, q, limit = 10, offset = randomOffset + (page * 10))
-                                tracks.forEach { addCandidate(it) }
+                                initialJobs.add(async {
+                                    try {
+                                        cloudService.searchTracks(token, q, limit = 10, offset = page * 10)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                            }
+                        }
+
+                        // If no positive filters specified, explore broad discovery
+                        if (!hasPositiveSeeds) {
+                            val discoveryQueries = listOf(
+                                "rock", "indie", "alternative", "synth-pop",
+                                "latin rock", "classic rock", "pop", "disco", "year:1990-2023"
+                            ).shuffled().take(6)
+                            for (q in discoveryQueries) {
+                                val randomOffset = (0..3).random() * 10
+                                for (page in 0..1) {
+                                    initialJobs.add(async {
+                                        try {
+                                            cloudService.searchTracks(token, q, limit = 10, offset = randomOffset + (page * 10))
+                                        } catch (_: Exception) { emptyList() }
+                                    })
+                                }
+                            }
+                        }
+
+                        // Await initial batch and add valid candidates
+                        val initialTracks = initialJobs.awaitAll().flatten()
+                        initialTracks.forEach { addCandidate(it) }
+
+                        // 2. Depth 1 Orbit Expansion (1st degree related artists)
+                        // Target candidate buffer to ensure enough variety for capping and anti-clumping
+                        val targetBuffer = targetCount * 2
+                        val seedArtists = if (includedArtists.isNotEmpty()) {
+                            includedArtists
+                        } else {
+                            candidates.map { it.artist }.distinct().take(6)
+                        }
+
+                        val depth1Artists = mutableListOf<String>()
+                        if (candidates.size < targetBuffer && seedArtists.isNotEmpty()) {
+                            for (seed in seedArtists) {
+                                try {
+                                    val rel = cloudService.fetchRelatedArtists(token, seed).toMutableList()
+                                    if (rel.size < 3) {
+                                        val more = cloudService.searchArtists(token, seed, limit = 6)
+                                        for (m in more) {
+                                            if (!rel.any { it.equals(m, ignoreCase = true) } && !m.equals(seed, ignoreCase = true)) {
+                                                rel.add(m)
+                                            }
+                                        }
+                                    }
+                                    for (r in rel) {
+                                        val rNorm = r.lowercase().trim()
+                                        if (visitedArtists.add(rNorm) && !excludedArtists.any { it.equals(rNorm, ignoreCase = true) || SearchUtils.fuzzyMatches(it, rNorm) }) {
+                                            depth1Artists.add(r)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            android.util.Log.d("DiscoverVM", "Discovered ${depth1Artists.size} Depth-1 related artists: $depth1Artists")
+
+                            val d1Jobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+                            for (rel in depth1Artists.take(12)) {
+                                for (offset in listOf(0, 10, 20)) {
+                                    d1Jobs.add(async {
+                                        try {
+                                            cloudService.searchTracks(token, "artist:\"$rel\"", limit = 10, offset = offset)
+                                        } catch (_: Exception) { emptyList() }
+                                    })
+                                }
+                            }
+                            val d1Tracks = d1Jobs.awaitAll().flatten()
+                            d1Tracks.forEach { addCandidate(it) }
+                        }
+
+                        // 3. Depth 2 Orbit Expansion (Peers of peers: 2nd degree related artists)
+                        // If candidates are still below targetBuffer and we have depth1 artists
+                        if (candidates.size < targetBuffer && depth1Artists.isNotEmpty()) {
+                            val depth2Artists = mutableListOf<String>()
+                            for (d1 in depth1Artists.take(8)) {
+                                if (candidates.size >= targetBuffer) break
+                                try {
+                                    val rel2 = cloudService.fetchRelatedArtists(token, d1)
+                                    for (r2 in rel2) {
+                                        val r2Norm = r2.lowercase().trim()
+                                        if (visitedArtists.add(r2Norm) && !excludedArtists.any { it.equals(r2Norm, ignoreCase = true) || SearchUtils.fuzzyMatches(it, r2Norm) }) {
+                                            depth2Artists.add(r2)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            android.util.Log.d("DiscoverVM", "Discovered ${depth2Artists.size} Depth-2 related artists: $depth2Artists")
+
+                            if (depth2Artists.isNotEmpty()) {
+                                val d2Jobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+                                for (rel2 in depth2Artists.take(15)) {
+                                    for (offset in listOf(0, 10, 20)) {
+                                        d2Jobs.add(async {
+                                            try {
+                                                cloudService.searchTracks(token, "artist:\"$rel2\"", limit = 10, offset = offset)
+                                            } catch (_: Exception) { emptyList() }
+                                        })
+                                    }
+                                }
+                                val d2Tracks = d2Jobs.awaitAll().flatten()
+                                d2Tracks.forEach { addCandidate(it) }
                             }
                         }
                     }
                 }
             }
 
-            // 2. Add master catalog songs as baseline pool
-            masterCatalog.forEach { addCandidate(it) }
-
-            // 3. Strict Library Exclusion: filter out any song in user's library/playlists
-            var filtered = if (state.excludeLibrarySongs) {
-                val libraryTracks = withContext(Dispatchers.IO) { repository.getAllTracksSync() }
-                val libraryTrackIds = libraryTracks.map { it.id.lowercase().trim() }.toSet()
-                val libraryKeys = libraryTracks.map { "${it.title.lowercase().trim()} - ${it.artist.lowercase().trim()}" }.toSet()
-
-                candidates.filterNot { track ->
-                    libraryTrackIds.contains(track.id.lowercase().trim()) ||
-                    libraryKeys.contains("${track.title.lowercase().trim()} - ${track.artist.lowercase().trim()}")
-                }
+            // 4. Master catalog additions (all pass through addCandidate which respects library exclusion)
+            if (!hasPositiveSeeds) {
+                masterCatalog.forEach { addCandidate(it) }
             } else {
-                candidates
-            }
-
-            // 4. Filter out EXCLUDED artists
-            val excludedArtists = state.artistModifiers
-                .filter { it.value == ChipModifier.EXCLUDE }
-                .keys.map { it.lowercase().trim() }
-            if (excludedArtists.isNotEmpty()) {
-                filtered = filtered.filterNot { track ->
-                    excludedArtists.any { track.artist.lowercase().contains(it) }
+                for (catTrack in masterCatalog) {
+                    val matchesArtist = includedArtists.any { SearchUtils.fuzzyMatches(it, catTrack.artist) }
+                    val matchesGenre = includedGenres.any { SearchUtils.fuzzyMatches(it, catTrack.album) }
+                    if (matchesArtist || matchesGenre) {
+                        addCandidate(catTrack)
+                    }
                 }
             }
 
-            // 5. Filter out EXCLUDED genres if track belongs to them
-            val excludedGenres = state.genreModifiers
-                .filter { it.value == ChipModifier.EXCLUDE }
-                .keys.map { it.lowercase().trim() }
-            if (excludedGenres.isNotEmpty()) {
-                filtered = filtered.filterNot { track ->
-                    excludedGenres.any { track.album.lowercase().contains(it) }
-                }
-            }
+            android.util.Log.d("DiscoverVM", "Total filtered non-library candidates harvested: ${candidates.size}")
 
-            // 6. Filter out EXCLUDED song seeds
-            val excludedTracks = state.trackModifiers
-                .filter { it.value == ChipModifier.EXCLUDE }
-                .keys.map { it.lowercase().trim() }
-            if (excludedTracks.isNotEmpty()) {
-                filtered = filtered.filterNot { track ->
-                    excludedTracks.any { track.title.lowercase().contains(it) }
-                }
-            }
-
-            // 6. Hidden Gems / Low Popularity Only filter
+            // 5. Hidden Gems / Low Popularity Only filter
+            var workingPool = candidates.toList()
             if (state.lowPopularityOnly) {
-                val gemFiltered = filtered.filter { track ->
+                val gemFiltered = workingPool.filter { track ->
                     when (state.hiddenGemTarget) {
                         "track" -> track.popularity <= 45
                         "artist" -> track.artistPopularity <= 48
@@ -707,68 +1049,13 @@ class DiscoverViewModel(
                         hiddenGemType = state.hiddenGemTarget
                     )
                 }
-                // If filter is too restrictive and left fewer than targetCount, use all filtered tracks tagged as gems
-                filtered = if (gemFiltered.size >= targetCount / 2) gemFiltered else filtered.map {
+                workingPool = if (gemFiltered.size >= targetCount / 2) gemFiltered else workingPool.map {
                     it.copy(isHiddenGem = true, hiddenGemType = state.hiddenGemTarget)
                 }
             }
 
-            // 7. Enforce exact targetCount: if pool has fewer than targetCount, harvest more seeds
-            val workingPool = filtered.toMutableList()
-            if (workingPool.size < targetCount && !token.isNullOrBlank() && cloudService != null) {
-                withContext(Dispatchers.IO) {
-                    val seedQueries = listOf(
-                        "genre:indie", "genre:rock", "genre:synth-pop", "genre:latin",
-                        "genre:disco", "genre:alternative", "year:1975-2023", "tag:hipster"
-                    ).shuffled()
-                    for (seedQuery in seedQueries) {
-                        if (workingPool.size >= targetCount * 2) break
-                        val seeds = cloudService.searchTracks(token, seedQuery, limit = 10, offset = (0..4).random() * 10)
-                        for (s in seeds) {
-                            val key = "${s.title.lowercase().trim()} - ${s.artist.lowercase().trim()}"
-                            if (!seenKeys.contains(key)) {
-                                seenKeys.add(key)
-                                var pass = true
-                                if (state.excludeLibrarySongs) {
-                                    val libTracks = repository.getAllTracksSync()
-                                    val libKeys = libTracks.map { "${it.title.lowercase().trim()} - ${it.artist.lowercase().trim()}" }.toSet()
-                                    if (libKeys.contains(key)) pass = false
-                                }
-                                if (pass) {
-                                    val tagged = if (state.lowPopularityOnly) {
-                                        s.copy(isHiddenGem = true, hiddenGemType = state.hiddenGemTarget)
-                                    } else s
-                                    workingPool.add(tagged)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If still below targetCount, top up with real tracks from masterCatalog
-            if (workingPool.size < targetCount) {
-                val existingPoolKeys = workingPool.map { "${it.title.lowercase().trim()} - ${it.artist.lowercase().trim()}" }.toSet()
-                val shuffledCatalog = masterCatalog.shuffled()
-                for (catTrack in shuffledCatalog) {
-                    if (workingPool.size >= targetCount) break
-                    val key = "${catTrack.title.lowercase().trim()} - ${catTrack.artist.lowercase().trim()}"
-                    if (!existingPoolKeys.contains(key)) {
-                        val tagged = if (state.lowPopularityOnly) {
-                            catTrack.copy(
-                                isHiddenGem = true,
-                                hiddenGemType = state.hiddenGemTarget,
-                                popularity = minOf(catTrack.popularity, 40),
-                                artistPopularity = minOf(catTrack.artistPopularity, 42)
-                            )
-                        } else catTrack
-                        workingPool.add(tagged)
-                    }
-                }
-            }
-
-            // 8. Diversity Enforcement & Per-Artist Capping
-            val maxPerArtist = maxOf(2, minOf(4, targetCount / 12))
+            // 6. Diversity Enforcement & Per-Artist Capping
+            val maxPerArtist = maxOf(2, minOf(4, targetCount / 10))
             val diverseSelection = mutableListOf<TrackEntity>()
             val artistCounts = mutableMapOf<String, Int>()
             val overflowTracks = mutableListOf<TrackEntity>()
@@ -784,41 +1071,30 @@ class DiscoverViewModel(
                 }
             }
 
-            // If we filtered out too many per artist, fill up from overflow tracks
             for (ot in overflowTracks) {
                 if (diverseSelection.size >= targetCount) break
                 diverseSelection.add(ot)
             }
 
-            // Strictly ensure targetCount is met (30, 50, 75, 100)
-            if (diverseSelection.size < targetCount) {
-                val currentIds = diverseSelection.map { it.id }.toSet()
-                for (catTrack in masterCatalog.shuffled()) {
-                    if (diverseSelection.size >= targetCount) break
-                    if (!currentIds.contains(catTrack.id)) {
-                        val tagged = if (state.lowPopularityOnly) {
-                            catTrack.copy(
-                                isHiddenGem = true,
-                                hiddenGemType = state.hiddenGemTarget,
-                                popularity = minOf(catTrack.popularity, 40),
-                                artistPopularity = minOf(catTrack.artistPopularity, 42)
-                            )
-                        } else catTrack
-                        diverseSelection.add(tagged)
-                    }
-                }
+            // 7. Final Selection & Quota Shortage Check
+            // No library songs are backfilled. If quota is not reached, show what was found and inform the user.
+            val finalTracks = diverseSelection.take(targetCount)
+            val finalNotice = if (finalTracks.size < targetCount) {
+                Strings.MixQuotaNotice.format(finalTracks.size, targetCount)
+            } else {
+                null
             }
 
-            // Take exactly targetCount
-            val finalTracks = diverseSelection.take(targetCount)
+            android.util.Log.d("DiscoverVM", "Generated final mix of ${finalTracks.size} tracks (target: $targetCount, notice: $finalNotice)")
 
-            // 9. True Shuffle with Anti-Clumping
+            // 8. True Shuffle with Anti-Clumping
             val shuffled = ShuffleEngine.shuffleTracks(finalTracks, avoidConsecutiveArtists = true)
 
             _uiState.update {
                 it.copy(
                     isGeneratingMix = false,
-                    discoveredMix = shuffled
+                    discoveredMix = shuffled,
+                    infoBannerMessage = finalNotice
                 )
             }
         }

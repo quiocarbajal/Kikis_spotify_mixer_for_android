@@ -1,5 +1,6 @@
 package com.kiki.spotifymixer.ui.screens.discover
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -80,6 +82,8 @@ import com.kiki.spotifymixer.ui.theme.TextPrimary
 import com.kiki.spotifymixer.ui.theme.TextSecondary
 import com.kiki.spotifymixer.ui.viewmodel.ChipModifier
 import com.kiki.spotifymixer.ui.viewmodel.DiscoverUiState
+import com.kiki.spotifymixer.ui.viewmodel.ModifierChip
+import com.kiki.spotifymixer.ui.viewmodel.RecentlyHeardFilter
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -89,17 +93,18 @@ fun DiscoverScreen(
     onSearchChange: (String) -> Unit,
     onArtistInputChange: (String) -> Unit,
     onAddArtistModifier: (String, ChipModifier) -> Unit,
-    onRemoveArtistModifier: (String) -> Unit,
+    onRemoveArtistModifier: (ModifierChip) -> Unit = {},
     onToggleGenre: (String) -> Unit,
     onGenreInputChange: (String) -> Unit = {},
     onAddGenreModifier: (String, ChipModifier) -> Unit = { _, _ -> },
-    onRemoveGenreModifier: (String) -> Unit = {},
+    onRemoveGenreModifier: (ModifierChip) -> Unit = {},
     onSelectGenreCategory: (String) -> Unit = {},
     onTrackInputChange: (String) -> Unit = {},
     onAddTrackModifier: (String, ChipModifier) -> Unit = { _, _ -> },
-    onRemoveTrackModifier: (String) -> Unit = {},
+    onRemoveTrackModifier: (ModifierChip) -> Unit = {},
     onToggleDecade: (String) -> Unit,
     onToggleExcludeLibrary: (Boolean) -> Unit,
+    onSetRecentlyHeardFilter: (RecentlyHeardFilter) -> Unit = {},
     onSetTargetCount: (Int) -> Unit,
     onToggleLowPopularityOnly: (Boolean) -> Unit,
     onSetHiddenGemTarget: (String) -> Unit,
@@ -114,7 +119,8 @@ fun DiscoverScreen(
     onSelectCatalogSearchType: (CatalogSearchType) -> Unit = {},
     onSelectCatalogOperator: (SearchLogicOperator) -> Unit = {},
     onAddCatalogModifier: (String, ChipModifier) -> Unit = { _, _ -> },
-    onRemoveCatalogModifier: (String) -> Unit = {},
+    onRemoveCatalogModifier: (ModifierChip) -> Unit = {},
+    onDismissInfoBanner: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -191,6 +197,7 @@ fun DiscoverScreen(
                 onRemoveTrackModifier = onRemoveTrackModifier,
                 onToggleDecade = onToggleDecade,
                 onToggleExcludeLibrary = onToggleExcludeLibrary,
+                onSetRecentlyHeardFilter = onSetRecentlyHeardFilter,
                 onSetTargetCount = onSetTargetCount,
                 onToggleLowPopularityOnly = onToggleLowPopularityOnly,
                 onSetHiddenGemTarget = onSetHiddenGemTarget,
@@ -201,7 +208,8 @@ fun DiscoverScreen(
                 onPlayTrack = onPlayTrack,
                 onAddTrack = onAddTrackToQueue,
                 onLikeTrack = onLikeTrack,
-                likedTrackIds = likedTrackIds
+                likedTrackIds = likedTrackIds,
+                onDismissInfoBanner = onDismissInfoBanner
             )
         } else {
             // Tab 1: Catalog Search
@@ -232,7 +240,7 @@ fun CatalogSearchContent(
     onSelectCatalogSearchType: (CatalogSearchType) -> Unit,
     onSelectCatalogOperator: (SearchLogicOperator) -> Unit,
     onAddCatalogModifier: (String, ChipModifier) -> Unit,
-    onRemoveCatalogModifier: (String) -> Unit,
+    onRemoveCatalogModifier: (ModifierChip) -> Unit,
     results: List<TrackEntity>,
     onAddTrack: (TrackEntity) -> Unit,
     onPlayTrack: (TrackEntity) -> Unit = {},
@@ -416,14 +424,14 @@ fun CatalogSearchContent(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                state.catalogModifiers.forEach { (term, mod) ->
-                    val isInclude = mod == ChipModifier.INCLUDE
+                state.catalogModifiers.forEach { chip ->
+                    val isInclude = chip.modifier == ChipModifier.INCLUDE
                     FilterChip(
                         selected = true,
-                        onClick = { onRemoveCatalogModifier(term) },
+                        onClick = { onRemoveCatalogModifier(chip) },
                         label = {
                             Text(
-                                text = if (isInclude) "+ $term ✕" else "- $term ✕",
+                                text = if (isInclude) "+ ${chip.term} ✕" else "- ${chip.term} ✕",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         },
@@ -482,17 +490,18 @@ fun SurpriseMeContent(
     state: DiscoverUiState,
     onArtistInputChange: (String) -> Unit,
     onAddArtistModifier: (String, ChipModifier) -> Unit,
-    onRemoveArtistModifier: (String) -> Unit,
+    onRemoveArtistModifier: (ModifierChip) -> Unit,
     onToggleGenre: (String) -> Unit,
     onGenreInputChange: (String) -> Unit = {},
     onAddGenreModifier: (String, ChipModifier) -> Unit = { _, _ -> },
-    onRemoveGenreModifier: (String) -> Unit = {},
+    onRemoveGenreModifier: (ModifierChip) -> Unit = {},
     onSelectGenreCategory: (String) -> Unit = {},
     onTrackInputChange: (String) -> Unit = {},
     onAddTrackModifier: (String, ChipModifier) -> Unit = { _, _ -> },
-    onRemoveTrackModifier: (String) -> Unit = {},
+    onRemoveTrackModifier: (ModifierChip) -> Unit = {},
     onToggleDecade: (String) -> Unit,
     onToggleExcludeLibrary: (Boolean) -> Unit,
+    onSetRecentlyHeardFilter: (RecentlyHeardFilter) -> Unit = {},
     onSetTargetCount: (Int) -> Unit,
     onToggleLowPopularityOnly: (Boolean) -> Unit,
     onSetHiddenGemTarget: (String) -> Unit,
@@ -503,7 +512,8 @@ fun SurpriseMeContent(
     onPlayTrack: (TrackEntity) -> Unit,
     onAddTrack: (TrackEntity) -> Unit,
     onLikeTrack: (TrackEntity) -> Unit = {},
-    likedTrackIds: Set<String> = emptySet()
+    likedTrackIds: Set<String> = emptySet(),
+    onDismissInfoBanner: () -> Unit = {}
 ) {
     val decades = listOf("60s", "70s", "80s", "90s", "00s", "10s")
 
@@ -626,14 +636,14 @@ fun SurpriseMeContent(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    state.artistModifiers.forEach { (artist, mod) ->
-                        val isInclude = mod == ChipModifier.INCLUDE
+                    state.artistModifiers.forEach { chip ->
+                        val isInclude = chip.modifier == ChipModifier.INCLUDE
                         FilterChip(
                             selected = true,
-                            onClick = { onRemoveArtistModifier(artist) },
+                            onClick = { onRemoveArtistModifier(chip) },
                             label = {
                                 Text(
-                                    text = if (isInclude) "+ $artist ✕" else "- $artist ✕",
+                                    text = if (isInclude) "+ ${chip.term} ✕" else "- ${chip.term} ✕",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             },
@@ -755,14 +765,14 @@ fun SurpriseMeContent(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    state.genreModifiers.forEach { (genre, mod) ->
-                        val isInclude = mod == ChipModifier.INCLUDE
+                    state.genreModifiers.forEach { chip ->
+                        val isInclude = chip.modifier == ChipModifier.INCLUDE
                         FilterChip(
                             selected = true,
-                            onClick = { onRemoveGenreModifier(genre) },
+                            onClick = { onRemoveGenreModifier(chip) },
                             label = {
                                 Text(
-                                    text = if (isInclude) "+ $genre ✕" else "- $genre ✕",
+                                    text = if (isInclude) "+ ${chip.term} ✕" else "- ${chip.term} ✕",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             },
@@ -890,14 +900,14 @@ fun SurpriseMeContent(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    state.trackModifiers.forEach { (trackName, mod) ->
-                        val isInclude = mod == ChipModifier.INCLUDE
+                    state.trackModifiers.forEach { chip ->
+                        val isInclude = chip.modifier == ChipModifier.INCLUDE
                         FilterChip(
                             selected = true,
-                            onClick = { onRemoveTrackModifier(trackName) },
+                            onClick = { onRemoveTrackModifier(chip) },
                             label = {
                                 Text(
-                                    text = if (isInclude) "+ $trackName ✕" else "- $trackName ✕",
+                                    text = if (isInclude) "+ ${chip.term} ✕" else "- ${chip.term} ✕",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             },
@@ -977,6 +987,64 @@ fun SurpriseMeContent(
                             checkedTrackColor = BgSurface2
                         )
                     )
+                }
+            }
+        }
+
+        // Section: Recently Heard Exclusion (NO escuchadas recientemente - matching Mac app)
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BgSurface1),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = Strings.RecentlyHeardLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = Strings.RecentlyHeardSubtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RecentlyHeardFilter.values().forEach { filter ->
+                            val isSelected = state.recentlyHeardFilter == filter
+                            val label = when (filter) {
+                                RecentlyHeardFilter.NONE -> Strings.RecentlyHeardNone
+                                RecentlyHeardFilter.LAST_7_DAYS -> Strings.RecentlyHeard7Days
+                                RecentlyHeardFilter.LAST_30_DAYS -> Strings.RecentlyHeard30Days
+                            }
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onSetRecentlyHeardFilter(filter) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = SpotifyGreen,
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = BgSurface2,
+                                    labelColor = TextSecondary
+                                ),
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1143,6 +1211,52 @@ fun SurpriseMeContent(
                     Icon(Icons.Default.Casino, contentDescription = null, tint = Color.Black)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(Strings.BtnGenerateMix, color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // Quota Shortage / Info Banner
+        if (state.infoBannerMessage != null) {
+            item {
+                Spacer(modifier = Modifier.height(10.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2235)),
+                    border = BorderStroke(1.dp, Color(0xFF4A80E8)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = Color(0xFF6AA8FF),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = state.infoBannerMessage,
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        IconButton(
+                            onClick = onDismissInfoBanner,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = "Cerrar",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

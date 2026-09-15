@@ -48,6 +48,11 @@ object Strings {
     const val DecadesHeader = "📅 DÉCADAS"
     const val ExcludeLibraryLabel = "NO en Canciones que te gustan"
     const val ExcludeLibrarySubtitle = "Excluir pistas ya guardadas en tu biblioteca"
+    const val RecentlyHeardLabel = "🕒 NO escuchadas recientemente"
+    const val RecentlyHeardSubtitle = "Excluir temas reproducidos en los últimos 7 o 30 días"
+    const val RecentlyHeardNone = "Ninguno"
+    const val RecentlyHeard7Days = "7 días"
+    const val RecentlyHeard30Days = "30 días"
     const val HiddenGemsLabel = "💎 Joyas Ocultas (Baja Popularidad)"
     const val HiddenGemsSubtitle = "Descubre canciones y artistas poco conocidos"
     const val TargetCountLabel = "Canciones en la mezcla:"
@@ -57,6 +62,7 @@ object Strings {
     const val BtnReplaceQueue = "Reemplazar Cola"
     const val BtnAddToQueue = "Agregar a la Cola"
     const val BtnPlayDiscovered = "Reproducir"
+    const val MixQuotaNotice = "Se encontraron %d de %d canciones nuevas. La órbita disponible para esta búsqueda es limitada fuera de tu biblioteca."
 
     // Cold Start Notice
     const val ColdStartTitle = "Aviso de Primera Reproducción"

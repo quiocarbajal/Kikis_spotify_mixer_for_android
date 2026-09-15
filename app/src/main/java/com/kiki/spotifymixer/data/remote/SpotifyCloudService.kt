@@ -5,7 +5,9 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
+import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
+import com.kiki.spotifymixer.domain.SearchUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -158,13 +160,8 @@ class SpotifyCloudService(
                     val progressFraction = (fetchedCount.toFloat() / totalTracks.toFloat().coerceAtLeast(1f)) * 0.5f
                     onProgress(0.1f + progressFraction, "Fetched $fetchedCount of $totalTracks Liked Songs...")
 
-                    // Incremental optimization: if all songs on this page were already in the database,
-                    // we are up-to-date and do not need to download historical pages repeatedly
-                    if (allExistedOnPage && fetchedCount >= 50) {
-                        nextUrl = null
-                    } else {
-                        nextUrl = json.getStringOrNull("next")
-                    }
+                    // Continue paging through all pages of user's liked songs
+                    nextUrl = json.getStringOrNull("next")
                 }
             }
 
@@ -677,6 +674,50 @@ class SpotifyCloudService(
 
     // --- Search API for Deep Discovery Harvesting ---
 
+    @Volatile
+    private var activeAccessToken: String? = null
+
+    suspend fun getValidToken(preferredToken: String? = null): String? = withContext(Dispatchers.IO) {
+        if (!activeAccessToken.isNullOrBlank()) {
+            return@withContext activeAccessToken
+        }
+        if (!preferredToken.isNullOrBlank()) {
+            activeAccessToken = preferredToken
+            return@withContext preferredToken
+        }
+        val stored = repository.getSetting("spotify_access_token")
+        val expiresAt = repository.getSetting("spotify_token_expires_at")?.toLongOrNull() ?: 0L
+        if (!stored.isNullOrBlank() && System.currentTimeMillis() < (expiresAt - 60_000L)) {
+            activeAccessToken = stored
+            return@withContext stored
+        }
+        refreshAndSaveToken()
+    }
+
+    suspend fun refreshAndSaveToken(): String? = withContext(Dispatchers.IO) {
+        try {
+            val refreshToken = repository.getSetting("spotify_refresh_token")
+            if (!refreshToken.isNullOrBlank()) {
+                val refreshResult = SpotifyPkceAuthManager.refreshAccessToken(refreshToken)
+                if (refreshResult.isSuccess) {
+                    val (newToken, newRefresh) = refreshResult.getOrThrow()
+                    activeAccessToken = newToken
+                    repository.setSetting("spotify_access_token", newToken)
+                    if (!newRefresh.isNullOrBlank()) {
+                        repository.setSetting("spotify_refresh_token", newRefresh)
+                    }
+                    val newExpiresAt = System.currentTimeMillis() + 3600_000L
+                    repository.setSetting("spotify_token_expires_at", newExpiresAt.toString())
+                    android.util.Log.d("SpotifyCloudService", "Auto-refreshed access token successfully")
+                    newToken
+                } else null
+            } else null
+        } catch (e: Exception) {
+            android.util.Log.e("SpotifyCloudService", "refreshAndSaveToken error", e)
+            null
+        }
+    }
+
     suspend fun searchTracks(
         accessToken: String,
         query: String,
@@ -688,18 +729,36 @@ class SpotifyCloudService(
             val encoded = java.net.URLEncoder.encode(query, "UTF-8")
             val safeLimit = limit.coerceIn(1, 10) // Spotify strictly enforces max limit of 10
             val url = "https://api.spotify.com/v1/search?type=track&q=$encoded&limit=$safeLimit&offset=$offset"
-            val request = Request.Builder()
+            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
+            var request = Request.Builder()
                 .url(url)
-                .addHeader("Authorization", "Bearer $accessToken")
+                .addHeader("Authorization", "Bearer $currentToken")
                 .get()
                 .build()
 
-            httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    android.util.Log.w("SpotifyCloudService", "searchTracks status: ${response.code} for query: $query")
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                } else {
                     return@withContext emptyList()
                 }
-                val body = response.body?.string() ?: "{}"
+            }
+
+            response.use { resp ->
+                if (!resp.isSuccessful) {
+                    android.util.Log.w("SpotifyCloudService", "searchTracks status: ${resp.code} for query: $query")
+                    return@withContext emptyList()
+                }
+                val body = resp.body?.string() ?: "{}"
                 val jsonElem = JsonParser.parseString(body)
                 if (!jsonElem.isJsonObject) return@withContext emptyList()
                 val json = jsonElem.asJsonObject
@@ -767,12 +826,26 @@ class SpotifyCloudService(
     suspend fun saveTrackToLiked(accessToken: String, trackId: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val jsonBody = """{"ids":["$trackId"]}""".toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
+            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext false
+            var request = Request.Builder()
                 .url("https://api.spotify.com/v1/me/tracks?ids=$trackId")
                 .put(jsonBody)
-                .addHeader("Authorization", "Bearer $accessToken")
+                .addHeader("Authorization", "Bearer $currentToken")
                 .build()
-            val response = httpClient.newCall(request).execute()
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url("https://api.spotify.com/v1/me/tracks?ids=$trackId")
+                        .put(jsonBody)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
             val isSuccess = response.isSuccessful || response.code in 200..299
             response.close()
             isSuccess
@@ -780,6 +853,139 @@ class SpotifyCloudService(
             android.util.Log.e("SpotifyCloudService", "saveTrackToLiked error", e)
             false
         }
+    }
+
+    /**
+     * Discovers similar & related artists via Spotify catalog search (matching macOS app logic).
+     * Bypasses Spotify's restricted/deprecated /v1/artists/{id}/related-artists endpoint.
+     */
+    suspend fun fetchRelatedArtists(accessToken: String, artistName: String): List<String> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<String>()
+        try {
+            val encoded = java.net.URLEncoder.encode(artistName, "UTF-8")
+            val searchUrl = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=8"
+            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
+            var searchReq = Request.Builder()
+                .url(searchUrl)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+            var resp = httpClient.newCall(searchReq).execute()
+            if (resp.code == 401) {
+                resp.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    searchReq = Request.Builder()
+                        .url(searchUrl)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    resp = httpClient.newCall(searchReq).execute()
+                } else {
+                    return@withContext emptyList()
+                }
+            }
+            resp.use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val jsonElem = JsonParser.parseString(body)
+                    if (jsonElem.isJsonObject) {
+                        val artistsObj = jsonElem.asJsonObject.getObjectOrNull("artists")
+                        val items = artistsObj?.getArrayOrNull("items")
+                        if (items != null) {
+                            val normSeed = SearchUtils.normalize(artistName)
+                            for (i in 0 until items.size()) {
+                                val aObj = items.get(i)?.asJsonObject ?: continue
+                                val name = aObj.getStringOrNull("name") ?: continue
+                                val normName = SearchUtils.normalize(name)
+                                // Filter out self and duplicate matches (matching macOS logic)
+                                if (normName != normSeed && list.none { SearchUtils.normalize(it) == normName }) {
+                                    list.add(name)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SpotifyCloudService", "fetchRelatedArtists error", e)
+        }
+        list.take(6)
+    }
+
+    /**
+     * Searches Spotify for top matching artist names for a query (e.g. "leon" -> ["León Gieco", "Leon Bridges", ...]).
+     */
+    suspend fun searchArtists(accessToken: String, query: String, limit: Int = 6): List<String> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<String>()
+        try {
+            val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+            val searchUrl = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=$limit"
+            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
+            val req = Request.Builder()
+                .url(searchUrl)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val jsonElem = JsonParser.parseString(body)
+                    if (jsonElem.isJsonObject) {
+                        val artistsObj = jsonElem.asJsonObject.getObjectOrNull("artists")
+                        val items = artistsObj?.getArrayOrNull("items")
+                        if (items != null) {
+                            for (i in 0 until items.size()) {
+                                val aObj = items.get(i)?.asJsonObject ?: continue
+                                val name = aObj.getStringOrNull("name") ?: continue
+                                if (list.none { it.equals(name, ignoreCase = true) }) {
+                                    list.add(name)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SpotifyCloudService", "searchArtists error", e)
+        }
+        list
+    }
+
+    /**
+     * Fetches recently played track IDs from user's Spotify account.
+     */
+    suspend fun fetchRecentlyPlayedTrackIds(accessToken: String): Set<String> = withContext(Dispatchers.IO) {
+        val ids = mutableSetOf<String>()
+        try {
+            val url = "https://api.spotify.com/v1/me/player/recently-played?limit=50"
+            val req = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: ""
+                    val json = JsonParser.parseString(body).asJsonObject
+                    val items = json.getArrayOrNull("items")
+                    if (items != null) {
+                        for (i in 0 until items.size()) {
+                            val item = items.get(i)?.asJsonObject
+                            val track = item?.getObjectOrNull("track")
+                            val id = track?.getStringOrNull("id")
+                            if (!id.isNullOrBlank()) {
+                                ids.add(id)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SpotifyCloudService", "fetchRecentlyPlayedTrackIds error", e)
+        }
+        ids
     }
 }
 

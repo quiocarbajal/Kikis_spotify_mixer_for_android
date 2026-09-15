@@ -3,6 +3,7 @@ package com.kiki.spotifymixer.ui.navigation
 import android.content.Intent
 import android.net.Uri
 import com.kiki.spotifymixer.service.KikiPlaybackService
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -155,6 +156,19 @@ fun AppScaffold(
     val effectiveQueue = if (filteredTracks.isNotEmpty()) filteredTracks else queueState.tracks
     LaunchedEffect(effectiveQueue) {
         KikiPlaybackService.activeQueue = effectiveQueue
+    }
+
+    // Clean back navigation and exit handling
+    BackHandler {
+        if (isSettingsOpen) {
+            isSettingsOpen = false
+        } else if (playerState.isExpandedPlayerOpen) {
+            playerViewModel.setExpandedPlayerOpen(false)
+        } else if (selectedTab != 0) {
+            selectedTab = 0
+        } else {
+            (context as? android.app.Activity)?.finish()
+        }
     }
 
     if (!libraryState.isLoggedIn) {
@@ -335,17 +349,18 @@ fun AppScaffold(
                     onSearchChange = { discoverViewModel.setSearchQuery(it) },
                     onArtistInputChange = { discoverViewModel.setArtistInputText(it) },
                     onAddArtistModifier = { artist, mod -> discoverViewModel.addArtistModifier(artist, mod) },
-                    onRemoveArtistModifier = { artist -> discoverViewModel.removeArtistModifier(artist) },
+                    onRemoveArtistModifier = { discoverViewModel.removeArtistModifier(it) },
                     onToggleGenre = { discoverViewModel.toggleGenreModifier(it) },
                     onGenreInputChange = { discoverViewModel.setGenreInputText(it) },
                     onAddGenreModifier = { genre, mod -> discoverViewModel.addGenreModifier(genre, mod) },
-                    onRemoveGenreModifier = { genre -> discoverViewModel.removeGenreModifier(genre) },
+                    onRemoveGenreModifier = { discoverViewModel.removeGenreModifier(it) },
                     onSelectGenreCategory = { discoverViewModel.setSelectedGenreCategory(it) },
                     onTrackInputChange = { discoverViewModel.setTrackInputText(it) },
                     onAddTrackModifier = { track, mod -> discoverViewModel.addTrackModifier(track, mod) },
-                    onRemoveTrackModifier = { track -> discoverViewModel.removeTrackModifier(track) },
+                    onRemoveTrackModifier = { discoverViewModel.removeTrackModifier(it) },
                     onToggleDecade = { discoverViewModel.toggleDecade(it) },
                     onToggleExcludeLibrary = { discoverViewModel.setExcludeLibrary(it) },
+                    onSetRecentlyHeardFilter = { discoverViewModel.setRecentlyHeardFilter(it) },
                     onSetTargetCount = { discoverViewModel.setTargetCount(it) },
                     onToggleLowPopularityOnly = { discoverViewModel.setLowPopularityOnly(it) },
                     onSetHiddenGemTarget = { discoverViewModel.setHiddenGemTarget(it) },
@@ -384,7 +399,8 @@ fun AppScaffold(
                     onSelectCatalogSearchType = { discoverViewModel.setCatalogSearchType(it) },
                     onSelectCatalogOperator = { discoverViewModel.setCatalogOperator(it) },
                     onAddCatalogModifier = { term, mod -> discoverViewModel.addCatalogModifier(term, mod) },
-                    onRemoveCatalogModifier = { term -> discoverViewModel.removeCatalogModifier(term) }
+                    onRemoveCatalogModifier = { discoverViewModel.removeCatalogModifier(it) },
+                    onDismissInfoBanner = { discoverViewModel.dismissInfoBanner() }
                 )
             }
         }
