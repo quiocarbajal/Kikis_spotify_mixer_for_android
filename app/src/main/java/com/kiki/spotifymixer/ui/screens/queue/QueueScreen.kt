@@ -95,7 +95,7 @@ fun QueueScreen(
     isPlaying: Boolean = false,
     showColdStartBanner: Boolean = false,
     onDismissColdStartBanner: (Boolean) -> Unit = {},
-    onPlayList: () -> Unit,
+    onPlayList: () -> Unit = {},
     onTrueShuffle: () -> Unit,
     onToggleAntiClumping: () -> Unit,
     onToggleLock: () -> Unit,
@@ -183,7 +183,7 @@ fun QueueScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     val displayName = when (state.activePlaylistName) {
                         "Liked Songs" -> Strings.LikedSongs
                         "All Synced Tracks" -> Strings.AllTracks
@@ -202,32 +202,34 @@ fun QueueScreen(
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    // Save Queue as Playlist
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Lock Reorder Button (Larger & Prominent)
                     IconButton(
-                        onClick = onSavePlaylist,
-                        enabled = state.tracks.isNotEmpty()
+                        onClick = onToggleLock,
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (state.isLocked) SpotifyGreen.copy(alpha = 0.22f) else BgSurface2)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.PlaylistAdd,
-                            contentDescription = "Guardar Playlist",
-                            tint = if (state.tracks.isNotEmpty()) SpotifyGreen else TextSecondary.copy(alpha = 0.4f),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    // Lock Reorder Button
-                    IconButton(onClick = onToggleLock) {
                         Icon(
                             imageVector = if (state.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                             contentDescription = if (state.isLocked) Strings.TooltipUnlock else Strings.TooltipLock,
                             tint = if (state.isLocked) SpotifyGreen else TextSecondary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(26.dp)
                         )
                     }
 
                     // Clear Queue
-                    IconButton(onClick = onClearQueue) {
+                    IconButton(
+                        onClick = onClearQueue,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(BgSurface2.copy(alpha = 0.7f))
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Delete,
                             contentDescription = Strings.TooltipClearQueue,
@@ -240,54 +242,54 @@ fun QueueScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Primary Queue Toolbar: Play, True Shuffle, Anti-Clump Chip
+            // Primary Queue Toolbar: Save List, True Shuffle (Icon Only), Anti-Clump Chip
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Play Button
+                // Save List Button (in place of previous Play Button)
                 Button(
-                    onClick = onPlayList,
-                    colors = ButtonDefaults.buttonColors(containerColor = SpotifyGreen),
+                    onClick = onSavePlaylist,
+                    enabled = state.tracks.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyGreen,
+                        disabledContainerColor = SpotifyGreen.copy(alpha = 0.3f),
+                        contentColor = Color.Black,
+                        disabledContentColor = Color.Black.copy(alpha = 0.4f)
+                    ),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1.1f)
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.PlayArrow,
+                        imageVector = Icons.Default.PlaylistAdd,
                         contentDescription = null,
-                        tint = Color.Black,
-                        modifier = Modifier.size(18.dp)
+                        tint = if (state.tracks.isNotEmpty()) Color.Black else Color.Black.copy(alpha = 0.4f),
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.width(3.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = Strings.BtnPlay,
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, fontSize = 13.sp),
-                        color = Color.Black,
+                        text = Strings.BtnSaveList,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold, fontSize = 14.sp),
+                        color = if (state.tracks.isNotEmpty()) Color.Black else Color.Black.copy(alpha = 0.4f),
                         maxLines = 1
                     )
                 }
 
-                // True Shuffle Button
-                Button(
+                // True Shuffle Button (Smaller, Symbol only)
+                IconButton(
                     onClick = onTrueShuffle,
-                    colors = ButtonDefaults.buttonColors(containerColor = BgSurface2),
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.weight(1.4f)
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(BgSurface2)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Shuffle,
-                        contentDescription = null,
+                        contentDescription = Strings.BtnTrueShuffle,
                         tint = SpotifyGreen,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = Strings.BtnTrueShuffle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = TextPrimary
+                        modifier = Modifier.size(22.dp)
                     )
                 }
 

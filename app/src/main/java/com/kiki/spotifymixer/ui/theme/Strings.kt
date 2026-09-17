@@ -9,6 +9,7 @@ object Strings {
     // Queue Screen
     const val QueueFilterPlaceholder = "Filtrar lista activa (%d canciones)..."
     const val BtnPlay = "Reproducir"
+    const val BtnSaveList = "Guardar Lista"
     const val BtnTrueShuffle = "Aleatorio Real"
     const val LabelAnticlump = "Anticlumping"
     const val TooltipLock = "Bloquear orden"
