@@ -614,21 +614,25 @@ class DiscoverViewModel(
     }
 
     /**
-     * Add-Only saving to Liked Songs from Discover results.
-     * Enforces strict safety: never unlikes.
+     * Toggles like/unlike status for a track from Discover results with Spotify sync.
      */
     fun saveTrackToLiked(track: TrackEntity, onFeedback: ((String) -> Unit)? = null) {
         viewModelScope.launch {
-            if (repository.isTrackInLiked(track.id)) {
-                onFeedback?.invoke("Ya está en tus Canciones que te gustan")
-                return@launch
-            }
+            val isLiked = repository.isTrackInLiked(track.id)
             val token = getValidAccessToken()
-            if (!token.isNullOrBlank() && cloudService != null) {
-                cloudService.saveTrackToLiked(token, track.id)
+            if (isLiked) {
+                if (!token.isNullOrBlank() && cloudService != null) {
+                    cloudService.removeTrackFromLiked(token, track.id)
+                }
+                repository.removeTrackFromLiked(track.id)
+                onFeedback?.invoke("Eliminada de tus Canciones que te gustan")
+            } else {
+                if (!token.isNullOrBlank() && cloudService != null) {
+                    cloudService.saveTrackToLiked(token, track.id)
+                }
+                repository.saveTrackToLiked(track)
+                onFeedback?.invoke("¡Agregada a Canciones que te gustan!")
             }
-            repository.saveTrackToLiked(track)
-            onFeedback?.invoke("¡Agregada a Canciones que te gustan!")
         }
     }
 

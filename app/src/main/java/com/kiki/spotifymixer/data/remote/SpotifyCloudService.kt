@@ -1,13 +1,14 @@
 package com.kiki.spotifymixer.data.remote
- 
+
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
-import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
-import com.kiki.spotifymixer.domain.SearchUtils
+import com.kiki.spotifymixer.util.KikiLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,6 +16,30 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
+
+sealed class PlaybackResult {
+    data object Success : PlaybackResult()
+    data object NoActiveDevice : PlaybackResult()
+    data object Unauthorized : PlaybackResult()
+    data class Error(val code: Int, val message: String) : PlaybackResult()
+}
+
+data class SpotifyDevice(
+    val id: String,
+    val name: String,
+    val type: String,
+    val isActive: Boolean,
+    val volumePercent: Int
+)
+
+data class SpotifyPlaybackState(
+    val isPlaying: Boolean,
+    val progressMs: Long,
+    val durationMs: Long,
+    val track: TrackEntity?,
+    val deviceName: String?,
+    val volumePercent: Int
+)
 
 private fun JsonObject.getStringOrNull(key: String): String? {
     val elem = get(key) ?: return null
@@ -131,12 +156,13 @@ class SpotifyCloudService(
 
                             val albumObj = trackObj.getObjectOrNull("album")
                             val albumName = albumObj?.getStringOrNull("name") ?: "Unknown Album"
+                            val durationMs = trackObj.getLongOrNull("duration_ms") ?: 0L
+
                             val images = albumObj?.getArrayOrNull("images")
                             val artUrl = if (images != null && images.size() > 0) {
                                 val firstImg = images.get(0)
                                 if (firstImg != null && firstImg.isJsonObject) firstImg.asJsonObject.getStringOrNull("url") else null
                             } else null
-                            val durationMs = trackObj.getLongOrNull("duration_ms") ?: 0L
 
                             val trackEntity = TrackEntity(
                                 id = id,
@@ -269,7 +295,7 @@ class SpotifyCloudService(
             if (playlistId == "liked_songs") {
                 return@withContext repository.getTracksForPlaylistSync("liked_songs")
             }
-            var nextUrl: String? = "https://api.spotify.com/v1/playlists/$playlistId/tracks?limit=50"
+            var nextUrl: String? = "https://api.spotify.com/v1/playlists/$playlistId/items?limit=50"
             while (nextUrl != null) {
                 val req = Request.Builder()
                     .url(nextUrl)
@@ -294,7 +320,7 @@ class SpotifyCloudService(
                         val itemElem = items.get(i)
                         if (itemElem == null || !itemElem.isJsonObject) continue
                         val item = itemElem.asJsonObject
-                        val track = item.getObjectOrNull("track") ?: continue
+                        val track = item.getObjectOrNull("item") ?: item.getObjectOrNull("track") ?: continue
 
                         val id = track.getStringOrNull("id") ?: continue
                         val name = track.getStringOrNull("name") ?: "Unknown Track"
@@ -341,109 +367,84 @@ class SpotifyCloudService(
                 repository.upsertTracks(tracks)
                 repository.setPlaylistTracks(playlistId, trackIds)
             }
+            tracks
         } catch (e: Exception) {
-            e.printStackTrace()
+            emptyList()
         }
-        tracks
     }
 
-    // --- Web API Playback Controls (Zero Screen Switch with Device Auto-Resolution) ---
-
     suspend fun getDevices(accessToken: String): List<SpotifyDevice> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<SpotifyDevice>()
         try {
-            val request = Request.Builder()
+            val req = Request.Builder()
                 .url("https://api.spotify.com/v1/me/player/devices")
                 .addHeader("Authorization", "Bearer $accessToken")
                 .get()
                 .build()
 
-            httpClient.newCall(request).execute().use { response ->
+            httpClient.newCall(req).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 val body = response.body?.string() ?: "{}"
-                val jsonElem = JsonParser.parseString(body)
-                if (!jsonElem.isJsonObject) return@withContext emptyList()
-                val json = jsonElem.asJsonObject
-                val items = json.getArrayOrNull("devices") ?: return@withContext emptyList()
-                val list = mutableListOf<SpotifyDevice>()
-                for (i in 0 until items.size()) {
-                    val dElem = items.get(i)
-                    if (dElem == null || !dElem.isJsonObject) continue
-                    val d = dElem.asJsonObject
-                    list.add(
-                        SpotifyDevice(
-                            id = d.getStringOrNull("id") ?: "",
-                            name = d.getStringOrNull("name") ?: "Unknown Device",
-                            type = d.getStringOrNull("type") ?: "Speaker",
-                            isActive = d.getBooleanOrNull("is_active") ?: false,
-                            volumePercent = d.getIntOrNull("volume_percent") ?: 100
-                        )
-                    )
+                val json = JsonParser.parseString(body).asJsonObject
+                val devices = json.getArrayOrNull("devices") ?: return@withContext emptyList()
+                for (i in 0 until devices.size()) {
+                    val d = devices.get(i)?.asJsonObject ?: continue
+                    val id = d.getStringOrNull("id") ?: continue
+                    val name = d.getStringOrNull("name") ?: "Unknown Device"
+                    val type = d.getStringOrNull("type") ?: "Speaker"
+                    val active = d.getBooleanOrNull("is_active") ?: false
+                    val vol = d.getIntOrNull("volume_percent") ?: 100
+                    list.add(SpotifyDevice(id, name, type, active, vol))
                 }
-                list
             }
-        } catch (_: Exception) {
-            emptyList()
+        } catch (e: Exception) {
+            // Devices query error
         }
+        list
     }
 
-    suspend fun transferPlayback(accessToken: String, deviceId: String, play: Boolean = true): Boolean = withContext(Dispatchers.IO) {
+    suspend fun playTracks(
+        accessToken: String,
+        uris: List<String>,
+        deviceId: String? = null,
+        positionMs: Long = 0L
+    ): PlaybackResult = withContext(Dispatchers.IO) {
         try {
-            val body = """{"device_ids": ["$deviceId"], "play": $play}""".toRequestBody(jsonMediaType)
-            val request = Request.Builder()
-                .url("https://api.spotify.com/v1/me/player")
-                .addHeader("Authorization", "Bearer $accessToken")
-                .put(body)
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 204
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    suspend fun playTracks(accessToken: String, uris: List<String>, deviceId: String? = null, positionMs: Long? = null): PlaybackResult = withContext(Dispatchers.IO) {
-        if (uris.isEmpty()) return@withContext PlaybackResult.Error(400, "No URIs provided")
-        try {
-            val url = if (!deviceId.isNullOrBlank()) {
+            val url = if (deviceId != null) {
                 "https://api.spotify.com/v1/me/player/play?device_id=$deviceId"
             } else {
                 "https://api.spotify.com/v1/me/player/play"
             }
-            val urisJson = uris.take(100).joinToString(separator = ",", prefix = "[", postfix = "]") { "\"$it\"" }
-            val bodyString = if (positionMs != null && positionMs > 0) {
-                """{"uris": $urisJson, "position_ms": $positionMs}"""
+
+            val urisJson = uris.joinToString(separator = "\",\"", prefix = "[\"", postfix = "\"]")
+            val jsonBody = if (positionMs > 0) {
+                """{"uris":$urisJson,"position_ms":$positionMs}"""
             } else {
-                """{"uris": $urisJson}"""
+                """{"uris":$urisJson}"""
             }
-            val jsonBody = bodyString.toRequestBody(jsonMediaType)
-            val request = Request.Builder()
+            val body = jsonBody.toRequestBody(jsonMediaType)
+
+            val req = Request.Builder()
                 .url(url)
                 .addHeader("Authorization", "Bearer $accessToken")
-                .put(jsonBody)
+                .put(body)
                 .build()
 
-            val (code, message) = httpClient.newCall(request).execute().use { response ->
-                Pair(response.code, response.message)
-            }
+            val response = httpClient.newCall(req).execute()
+            val code = response.code
+            val message = response.message
+            response.close()
 
-            if (code == 200 || code == 204) {
+            if (code in 200..299) {
                 return@withContext PlaybackResult.Success
             }
 
-            if (code == 401) {
-                return@withContext PlaybackResult.Unauthorized
-            }
-
             if (code == 404 && deviceId == null) {
-                // If direct play failed with NO_ACTIVE_DEVICE, query available devices
                 val devices = getDevices(accessToken)
                 val target = devices.firstOrNull { it.isActive }
                     ?: devices.firstOrNull { it.type.equals("Smartphone", ignoreCase = true) }
                     ?: devices.firstOrNull()
                 if (target != null && target.id.isNotBlank()) {
-                    // Waking up an idle device by targeting device_id directly
                     return@withContext playTracks(accessToken, uris, target.id, positionMs)
                 } else {
                     return@withContext PlaybackResult.NoActiveDevice
@@ -454,10 +455,8 @@ class SpotifyCloudService(
                 return@withContext PlaybackResult.NoActiveDevice
             }
 
-            android.util.Log.w("SpotifyCloudService", "playTracks status: $code $message")
             PlaybackResult.Error(code, message)
         } catch (e: Exception) {
-            android.util.Log.e("SpotifyCloudService", "playTracks error", e)
             PlaybackResult.Error(-1, e.message ?: "Unknown error")
         }
     }
@@ -484,22 +483,27 @@ class SpotifyCloudService(
                 val isPlaying = json.getBooleanOrNull("is_playing") ?: false
                 val progressMs = json.getLongOrNull("progress_ms") ?: 0L
 
-                val itemObj = json.getObjectOrNull("item")
-                val track = if (itemObj != null) {
-                    val id = itemObj.getStringOrNull("id") ?: ""
-                    val uri = itemObj.getStringOrNull("uri") ?: "spotify:track:$id"
-                    val title = itemObj.getStringOrNull("name") ?: "Unknown Track"
-                    val durationMs = itemObj.getLongOrNull("duration_ms") ?: 0L
+                val devObj = json.getObjectOrNull("device")
+                val deviceName = devObj?.getStringOrNull("name")
+                val vol = devObj?.getIntOrNull("volume_percent") ?: 100
 
-                    val artistsArray = itemObj.getArrayOrNull("artists")
-                    val artistName = if (artistsArray != null && artistsArray.size() > 0) {
+                val itemObj = json.getObjectOrNull("item")
+                var currentTrackEntity: TrackEntity? = null
+                var durationMs = 0L
+
+                if (itemObj != null) {
+                    val id = itemObj.getStringOrNull("id")
+                    val name = itemObj.getStringOrNull("name") ?: "Unknown Track"
+                    durationMs = itemObj.getLongOrNull("duration_ms") ?: 0L
+                    val uri = itemObj.getStringOrNull("uri") ?: ""
+
+                    val artists = itemObj.getArrayOrNull("artists")
+                    val artistName = if (artists != null && artists.size() > 0) {
                         val names = mutableListOf<String>()
-                        for (j in 0 until artistsArray.size()) {
-                            val aElem = artistsArray.get(j)
-                            if (aElem != null && aElem.isJsonObject) {
-                                val aName = aElem.asJsonObject.getStringOrNull("name")
-                                if (!aName.isNullOrBlank()) names.add(aName)
-                            }
+                        for (i in 0 until artists.size()) {
+                            val a = artists.get(i)?.asJsonObject
+                            val an = a?.getStringOrNull("name")
+                            if (!an.isNullOrBlank()) names.add(an)
                         }
                         if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                     } else "Unknown Artist"
@@ -508,31 +512,29 @@ class SpotifyCloudService(
                     val albumName = albumObj?.getStringOrNull("name") ?: "Unknown Album"
                     val images = albumObj?.getArrayOrNull("images")
                     val artUrl = if (images != null && images.size() > 0) {
-                        val firstImg = images.get(0)
-                        if (firstImg != null && firstImg.isJsonObject) firstImg.asJsonObject.getStringOrNull("url") else null
+                        images.get(0)?.asJsonObject?.getStringOrNull("url")
                     } else null
 
-                    TrackEntity(
-                        id = id,
-                        uri = uri,
-                        title = title,
-                        artist = artistName,
-                        album = albumName,
-                        albumArtUrl = artUrl,
-                        durationMs = durationMs
-                    )
-                } else null
-
-                val deviceObj = json.getObjectOrNull("device")
-                val deviceName = deviceObj?.getStringOrNull("name")
-                val volume = deviceObj?.getIntOrNull("volume_percent") ?: 100
+                    if (id != null) {
+                        currentTrackEntity = TrackEntity(
+                            id = id,
+                            title = name,
+                            artist = artistName,
+                            album = albumName,
+                            durationMs = durationMs,
+                            uri = uri,
+                            albumArtUrl = artUrl
+                        )
+                    }
+                }
 
                 SpotifyPlaybackState(
                     isPlaying = isPlaying,
                     progressMs = progressMs,
-                    track = track,
+                    durationMs = durationMs,
+                    track = currentTrackEntity,
                     deviceName = deviceName,
-                    volumePercent = volume
+                    volumePercent = vol
                 )
             }
         } catch (e: Exception) {
@@ -540,134 +542,143 @@ class SpotifyCloudService(
         }
     }
 
-    suspend fun resumePlayback(accessToken: String, deviceId: String? = null): PlaybackResult = withContext(Dispatchers.IO) {
-        try {
-            val url = if (!deviceId.isNullOrBlank()) {
-                "https://api.spotify.com/v1/me/player/play?device_id=$deviceId"
-            } else {
-                "https://api.spotify.com/v1/me/player/play"
-            }
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("Authorization", "Bearer $accessToken")
-                .put("".toRequestBody(null))
-                .build()
-
-            val (code, message) = httpClient.newCall(request).execute().use { response ->
-                Pair(response.code, response.message)
-            }
-
-            if (code == 200 || code == 204) return@withContext PlaybackResult.Success
-            if (code == 401) return@withContext PlaybackResult.Unauthorized
-            if (code == 404 && deviceId == null) {
-                val devices = getDevices(accessToken)
-                val target = devices.firstOrNull { it.isActive }
-                    ?: devices.firstOrNull { it.type.equals("Smartphone", ignoreCase = true) }
-                    ?: devices.firstOrNull()
-                if (target != null && target.id.isNotBlank()) {
-                    return@withContext resumePlayback(accessToken, target.id)
-                }
-                return@withContext PlaybackResult.NoActiveDevice
-            }
-            if (code == 404) return@withContext PlaybackResult.NoActiveDevice
-            PlaybackResult.Error(code, message)
-        } catch (e: Exception) {
-            PlaybackResult.Error(-1, e.message ?: "Unknown error")
-        }
-    }
-
-    suspend fun seekTo(accessToken: String, positionMs: Long): PlaybackResult = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder()
-                .url("https://api.spotify.com/v1/me/player/seek?position_ms=$positionMs")
-                .addHeader("Authorization", "Bearer $accessToken")
-                .put("".toRequestBody(null))
-                .build()
-
-            val (code, message) = httpClient.newCall(request).execute().use { response ->
-                Pair(response.code, response.message)
-            }
-
-            if (code == 200 || code == 204) return@withContext PlaybackResult.Success
-            if (code == 401) return@withContext PlaybackResult.Unauthorized
-            if (code == 404) return@withContext PlaybackResult.NoActiveDevice
-            PlaybackResult.Error(code, message)
-        } catch (e: Exception) {
-            PlaybackResult.Error(-1, e.message ?: "Unknown error")
-        }
-    }
-
-    suspend fun addToQueue(accessToken: String, uri: String, deviceId: String? = null): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val encodedUri = java.net.URLEncoder.encode(uri, "UTF-8")
-            val url = if (!deviceId.isNullOrBlank()) {
-                "https://api.spotify.com/v1/me/player/queue?uri=$encodedUri&device_id=$deviceId"
-            } else {
-                "https://api.spotify.com/v1/me/player/queue?uri=$encodedUri"
-            }
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("Authorization", "Bearer $accessToken")
-                .post("".toRequestBody(null))
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 204
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
     suspend fun pausePlayback(accessToken: String): PlaybackResult = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
+            val req = Request.Builder()
                 .url("https://api.spotify.com/v1/me/player/pause")
                 .addHeader("Authorization", "Bearer $accessToken")
                 .put("".toRequestBody(null))
                 .build()
-
-            val (code, message) = httpClient.newCall(request).execute().use { response ->
-                Pair(response.code, response.message)
+            val resp = httpClient.newCall(req).execute()
+            val code = resp.code
+            val message = resp.message
+            resp.close()
+            when (code) {
+                in 200..299 -> PlaybackResult.Success
+                401 -> PlaybackResult.Unauthorized
+                404 -> PlaybackResult.NoActiveDevice
+                else -> PlaybackResult.Error(code, message)
             }
-
-            if (code == 200 || code == 204) return@withContext PlaybackResult.Success
-            if (code == 401) return@withContext PlaybackResult.Unauthorized
-            if (code == 404) return@withContext PlaybackResult.NoActiveDevice
-            PlaybackResult.Error(code, message)
         } catch (e: Exception) {
             PlaybackResult.Error(-1, e.message ?: "Unknown error")
+        }
+    }
+
+    suspend fun resumePlayback(accessToken: String): PlaybackResult = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("https://api.spotify.com/v1/me/player/play")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .put("".toRequestBody(null))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val code = resp.code
+            val message = resp.message
+            resp.close()
+            when (code) {
+                in 200..299 -> PlaybackResult.Success
+                401 -> PlaybackResult.Unauthorized
+                404 -> PlaybackResult.NoActiveDevice
+                else -> PlaybackResult.Error(code, message)
+            }
+        } catch (e: Exception) {
+            PlaybackResult.Error(-1, e.message ?: "Unknown error")
+        }
+    }
+
+    suspend fun seekTo(accessToken: String, positionMs: Long): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("https://api.spotify.com/v1/me/player/seek?position_ms=$positionMs")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .put("".toRequestBody(null))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun setVolume(accessToken: String, volumePercent: Int): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val v = volumePercent.coerceIn(0, 100)
+            val req = Request.Builder()
+                .url("https://api.spotify.com/v1/me/player/volume?volume_percent=$v")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .put("".toRequestBody(null))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            false
         }
     }
 
     suspend fun skipToNext(accessToken: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
+            val req = Request.Builder()
                 .url("https://api.spotify.com/v1/me/player/next")
                 .addHeader("Authorization", "Bearer $accessToken")
                 .post("".toRequestBody(null))
                 .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 204
-            }
-        } catch (_: Exception) {
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
             false
         }
     }
 
     suspend fun skipToPrevious(accessToken: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
+            val req = Request.Builder()
                 .url("https://api.spotify.com/v1/me/player/previous")
                 .addHeader("Authorization", "Bearer $accessToken")
                 .post("".toRequestBody(null))
                 .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
 
-            httpClient.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 204
-            }
-        } catch (_: Exception) {
+    suspend fun setRepeatMode(accessToken: String, state: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("https://api.spotify.com/v1/me/player/repeat?state=$state")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .put("".toRequestBody(null))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun setShuffle(accessToken: String, state: Boolean): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("https://api.spotify.com/v1/me/player/shuffle?state=$state")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .put("".toRequestBody(null))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
             false
         }
     }
@@ -678,20 +689,25 @@ class SpotifyCloudService(
     private var activeAccessToken: String? = null
 
     suspend fun getValidToken(preferredToken: String? = null): String? = withContext(Dispatchers.IO) {
-        if (!activeAccessToken.isNullOrBlank()) {
-            return@withContext activeAccessToken
-        }
-        if (!preferredToken.isNullOrBlank()) {
-            activeAccessToken = preferredToken
-            return@withContext preferredToken
-        }
         val stored = repository.getSetting("spotify_access_token")
         val expiresAt = repository.getSetting("spotify_token_expires_at")?.toLongOrNull() ?: 0L
-        if (!stored.isNullOrBlank() && System.currentTimeMillis() < (expiresAt - 60_000L)) {
+        val now = System.currentTimeMillis()
+
+        if (!stored.isNullOrBlank() && (expiresAt == 0L || now < (expiresAt - 60_000L))) {
             activeAccessToken = stored
             return@withContext stored
         }
-        refreshAndSaveToken()
+
+        if (!preferredToken.isNullOrBlank() && activeAccessToken == null) {
+            activeAccessToken = preferredToken
+        }
+
+        val refreshed = refreshAndSaveToken()
+        if (!refreshed.isNullOrBlank()) {
+            return@withContext refreshed
+        }
+
+        stored ?: preferredToken ?: activeAccessToken
     }
 
     suspend fun refreshAndSaveToken(): String? = withContext(Dispatchers.IO) {
@@ -708,12 +724,15 @@ class SpotifyCloudService(
                     }
                     val newExpiresAt = System.currentTimeMillis() + 3600_000L
                     repository.setSetting("spotify_token_expires_at", newExpiresAt.toString())
-                    android.util.Log.d("SpotifyCloudService", "Auto-refreshed access token successfully")
+                    KikiLog.d("SpotifyCloudService: Auto-refreshed access token successfully")
                     newToken
-                } else null
+                } else {
+                    KikiLog.e("SpotifyCloudService: refreshAccessToken returned failure: ${refreshResult.exceptionOrNull()?.message}")
+                    null
+                }
             } else null
         } catch (e: Exception) {
-            android.util.Log.e("SpotifyCloudService", "refreshAndSaveToken error", e)
+            KikiLog.e("SpotifyCloudService: refreshAndSaveToken error", e)
             null
         }
     }
@@ -727,9 +746,9 @@ class SpotifyCloudService(
         val list = mutableListOf<TrackEntity>()
         try {
             val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-            val safeLimit = limit.coerceIn(1, 10) // Spotify strictly enforces max limit of 10
+            val safeLimit = limit.coerceIn(1, 10)
             val url = "https://api.spotify.com/v1/search?type=track&q=$encoded&limit=$safeLimit&offset=$offset"
-            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
             var request = Request.Builder()
                 .url(url)
                 .addHeader("Authorization", "Bearer $currentToken")
@@ -748,89 +767,79 @@ class SpotifyCloudService(
                         .get()
                         .build()
                     response = httpClient.newCall(request).execute()
-                } else {
-                    return@withContext emptyList()
                 }
             }
 
-            response.use { resp ->
-                if (!resp.isSuccessful) {
-                    android.util.Log.w("SpotifyCloudService", "searchTracks status: ${resp.code} for query: $query")
-                    return@withContext emptyList()
-                }
-                val body = resp.body?.string() ?: "{}"
-                val jsonElem = JsonParser.parseString(body)
-                if (!jsonElem.isJsonObject) return@withContext emptyList()
-                val json = jsonElem.asJsonObject
-                val tracksObj = json.getObjectOrNull("tracks") ?: return@withContext emptyList()
-                val items = tracksObj.getArrayOrNull("items") ?: return@withContext emptyList()
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyList()
+            }
 
-                for (i in 0 until items.size()) {
-                    val tElem = items.get(i)
-                    if (tElem == null || !tElem.isJsonObject) continue
-                    val t = tElem.asJsonObject
-                    val id = t.getStringOrNull("id") ?: continue
-                    val uri = t.getStringOrNull("uri") ?: "spotify:track:$id"
-                    val title = t.getStringOrNull("name") ?: "Unknown Track"
+            val body = response.body?.string() ?: "{}"
+            response.close()
 
-                    val artistsArray = t.getArrayOrNull("artists")
-                    val artistName = if (artistsArray != null && artistsArray.size() > 0) {
-                        val names = mutableListOf<String>()
-                        for (j in 0 until artistsArray.size()) {
-                            val aElem = artistsArray.get(j)
-                            if (aElem != null && aElem.isJsonObject) {
-                                val aName = aElem.asJsonObject.getStringOrNull("name")
-                                if (!aName.isNullOrBlank()) names.add(aName)
-                            }
-                        }
-                        if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
-                    } else "Unknown Artist"
+            val json = JsonParser.parseString(body).asJsonObject
+            val tracksObj = json.getObjectOrNull("tracks") ?: return@withContext emptyList()
+            val items = tracksObj.getArrayOrNull("items") ?: return@withContext emptyList()
 
-                    val albumObj = t.getObjectOrNull("album")
-                    val albumName = albumObj?.getStringOrNull("name") ?: "Single"
-                    val images = albumObj?.getArrayOrNull("images")
-                    val artUrl = if (images != null && images.size() > 0) {
-                        val firstImg = images.get(0)
-                        if (firstImg != null && firstImg.isJsonObject) firstImg.asJsonObject.getStringOrNull("url") else null
-                    } else null
-                    val durationMs = t.getLongOrNull("duration_ms") ?: 0L
-                    val pop = t.getIntOrNull("popularity") ?: 50
+            for (i in 0 until items.size()) {
+                val t = items.get(i)?.asJsonObject ?: continue
+                val id = t.getStringOrNull("id") ?: continue
+                val name = t.getStringOrNull("name") ?: "Unknown"
+                val uri = t.getStringOrNull("uri") ?: "spotify:track:$id"
+                val duration = t.getLongOrNull("duration_ms") ?: 0L
 
-                    list.add(
-                        TrackEntity(
-                            id = id,
-                            uri = uri,
-                            title = title,
-                            artist = artistName,
-                            album = albumName,
-                            albumArtUrl = artUrl,
-                            durationMs = durationMs,
-                            popularity = pop,
-                            artistPopularity = pop,
-                            isHiddenGem = pop <= 42,
-                            hiddenGemType = if (pop <= 42) "track" else null
-                        )
+                val artists = t.getArrayOrNull("artists")
+                val artistName = if (artists != null && artists.size() > 0) {
+                    val names = mutableListOf<String>()
+                    for (j in 0 until artists.size()) {
+                        val a = artists.get(j)?.asJsonObject
+                        val an = a?.getStringOrNull("name")
+                        if (!an.isNullOrBlank()) names.add(an)
+                    }
+                    if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
+                } else "Unknown Artist"
+
+                val albumObj = t.getObjectOrNull("album")
+                val albumName = albumObj?.getStringOrNull("name") ?: "Unknown Album"
+                val images = albumObj?.getArrayOrNull("images")
+                val artUrl = if (images != null && images.size() > 0) {
+                    images.get(0)?.asJsonObject?.getStringOrNull("url")
+                } else null
+
+                list.add(
+                    TrackEntity(
+                        id = id,
+                        title = name,
+                        artist = artistName,
+                        album = albumName,
+                        durationMs = duration,
+                        uri = uri,
+                        albumArtUrl = artUrl
                     )
-                }
+                )
             }
         } catch (e: Exception) {
-            android.util.Log.e("SpotifyCloudService", "searchTracks error", e)
+            KikiLog.e("searchTracks error", e)
         }
         list
     }
 
     /**
      * Adds a track to the user's Spotify Liked Songs ("Canciones que te gustan").
-     * Enforces Add-Only policy: zero deletion capabilities.
+     * Uses the unified Spotify Web API endpoint: PUT /v1/me/library?uris=spotify:track:{trackId}
      */
     suspend fun saveTrackToLiked(accessToken: String, trackId: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val jsonBody = """{"ids":["$trackId"]}""".toRequestBody("application/json".toMediaType())
-            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext false
+            var currentToken = getValidToken(accessToken) ?: return@withContext false
+            val trackUri = if (trackId.startsWith("spotify:track:")) trackId else "spotify:track:$trackId"
+            val url = "https://api.spotify.com/v1/me/library?uris=$trackUri"
+            val emptyBody = "".toRequestBody(null)
             var request = Request.Builder()
-                .url("https://api.spotify.com/v1/me/tracks?ids=$trackId")
-                .put(jsonBody)
+                .url(url)
+                .put(emptyBody)
                 .addHeader("Authorization", "Bearer $currentToken")
+                .addHeader("Content-Length", "0")
                 .build()
             var response = httpClient.newCall(request).execute()
             if (response.code == 401) {
@@ -839,18 +848,180 @@ class SpotifyCloudService(
                 if (!refreshed.isNullOrBlank()) {
                     currentToken = refreshed
                     request = Request.Builder()
-                        .url("https://api.spotify.com/v1/me/tracks?ids=$trackId")
-                        .put(jsonBody)
+                        .url(url)
+                        .put(emptyBody)
                         .addHeader("Authorization", "Bearer $currentToken")
+                        .addHeader("Content-Length", "0")
                         .build()
                     response = httpClient.newCall(request).execute()
                 }
             }
             val isSuccess = response.isSuccessful || response.code in 200..299
+            val code = response.code
+            val errBody = if (!isSuccess) response.body?.string() else null
             response.close()
+            KikiLog.d("saveTrackToLiked trackId=$trackId HTTP $code isSuccess=$isSuccess ${errBody ?: ""}")
             isSuccess
         } catch (e: Exception) {
-            android.util.Log.e("SpotifyCloudService", "saveTrackToLiked error", e)
+            KikiLog.e("saveTrackToLiked error for $trackId", e)
+            false
+        }
+    }
+
+    /**
+     * Removes a track from the user's Spotify Liked Songs ("Canciones que te gustan").
+     * Uses the unified Spotify Web API endpoint: DELETE /v1/me/library?uris=spotify:track:{trackId}
+     */
+    suspend fun removeTrackFromLiked(accessToken: String, trackId: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            var currentToken = getValidToken(accessToken) ?: return@withContext false
+            val trackUri = if (trackId.startsWith("spotify:track:")) trackId else "spotify:track:$trackId"
+            val url = "https://api.spotify.com/v1/me/library?uris=$trackUri"
+            val emptyBody = "".toRequestBody(null)
+            var request = Request.Builder()
+                .url(url)
+                .delete(emptyBody)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .addHeader("Content-Length", "0")
+                .build()
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url(url)
+                        .delete(emptyBody)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .addHeader("Content-Length", "0")
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+            val isSuccess = response.isSuccessful || response.code in 200..299
+            val code = response.code
+            val errBody = if (!isSuccess) response.body?.string() else null
+            response.close()
+            KikiLog.d("removeTrackFromLiked trackId=$trackId HTTP $code isSuccess=$isSuccess ${errBody ?: ""}")
+            isSuccess
+        } catch (e: Exception) {
+            KikiLog.e("removeTrackFromLiked error for $trackId", e)
+            false
+        }
+    }
+
+    /**
+     * Creates a new playlist on Spotify for the current user.
+     */
+    suspend fun createPlaylist(accessToken: String, name: String, description: String = "Created with Kiki's Spotify Mixer", isPublic: Boolean = false): String? = withContext(Dispatchers.IO) {
+        try {
+            var currentToken = getValidToken(accessToken) ?: return@withContext null
+            val escapedName = name.replace("\"", "\\\"")
+            val escapedDesc = description.replace("\"", "\\\"")
+            val jsonBody = """{"name":"$escapedName","description":"$escapedDesc","public":$isPublic}""".toRequestBody(jsonMediaType)
+            var request = Request.Builder()
+                .url("https://api.spotify.com/v1/me/playlists")
+                .post(jsonBody)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .build()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url("https://api.spotify.com/v1/me/playlists")
+                        .post(jsonBody)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+
+            val body = response.body?.string() ?: "{}"
+            val code = response.code
+            val isSuccess = response.isSuccessful
+            response.close()
+
+            KikiLog.d("createPlaylist name=\"$name\" HTTP $code: $body")
+            if (isSuccess) {
+                val obj = JsonParser.parseString(body).asJsonObject
+                if (obj.has("id") && !obj.get("id").isJsonNull) obj.get("id").asString else null
+            } else null
+        } catch (e: Exception) {
+            KikiLog.e("createPlaylist error", e)
+            null
+        }
+    }
+
+    /**
+     * Replaces all tracks in a Spotify playlist with the given list of track URIs.
+     * Batches in chunks of 100 as per Spotify API requirements.
+     */
+    suspend fun replacePlaylistTracks(accessToken: String, playlistId: String, trackUris: List<String>): Boolean = withContext(Dispatchers.IO) {
+        try {
+            var currentToken = getValidToken(accessToken) ?: return@withContext false
+            val cleanUris = trackUris.map { if (it.startsWith("spotify:track:")) it else "spotify:track:$it" }
+            val chunks = cleanUris.chunked(100)
+
+            KikiLog.d("replacePlaylistTracks playlistId=$playlistId totalTracks=${cleanUris.size} chunks=${chunks.size}")
+
+            // Step 1: Replace with first chunk (or empty if none)
+            val firstChunk = chunks.firstOrNull() ?: emptyList()
+            val urisJson = firstChunk.joinToString(separator = "\",\"", prefix = "[\"", postfix = "\"]")
+            val replaceBody = if (firstChunk.isNotEmpty()) """{"uris":$urisJson}""" else """{"uris":[]}"""
+            var replaceRequest = Request.Builder()
+                .url("https://api.spotify.com/v1/playlists/$playlistId/items")
+                .put(replaceBody.toRequestBody(jsonMediaType))
+                .addHeader("Authorization", "Bearer $currentToken")
+                .build()
+
+            var replaceResponse = httpClient.newCall(replaceRequest).execute()
+            if (replaceResponse.code == 401) {
+                replaceResponse.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    replaceRequest = Request.Builder()
+                        .url("https://api.spotify.com/v1/playlists/$playlistId/items")
+                        .put(replaceBody.toRequestBody(jsonMediaType))
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .build()
+                    replaceResponse = httpClient.newCall(replaceRequest).execute()
+                }
+            }
+
+            val replaceSuccess = replaceResponse.isSuccessful
+            val replaceCode = replaceResponse.code
+            val replaceRespBody = replaceResponse.body?.string()
+            replaceResponse.close()
+            KikiLog.d("replacePlaylistTracks Step 1 HTTP $replaceCode isSuccess=$replaceSuccess ${replaceRespBody ?: ""}")
+
+            if (!replaceSuccess) return@withContext false
+
+            // Step 2: Append subsequent chunks if tracks > 100
+            for (i in 1 until chunks.size) {
+                val chunk = chunks[i]
+                val chunkJson = chunk.joinToString(separator = "\",\"", prefix = "[\"", postfix = "\"]")
+                val appendBody = """{"uris":$chunkJson}"""
+                val appendRequest = Request.Builder()
+                    .url("https://api.spotify.com/v1/playlists/$playlistId/items")
+                    .post(appendBody.toRequestBody(jsonMediaType))
+                    .addHeader("Authorization", "Bearer $currentToken")
+                    .build()
+
+                val appendResponse = httpClient.newCall(appendRequest).execute()
+                val appendSuccess = appendResponse.isSuccessful
+                appendResponse.close()
+                if (!appendSuccess) return@withContext false
+            }
+
+            true
+        } catch (e: Exception) {
+            KikiLog.e("replacePlaylistTracks error", e)
             false
         }
     }
@@ -863,66 +1034,114 @@ class SpotifyCloudService(
         val list = mutableListOf<String>()
         try {
             val encoded = java.net.URLEncoder.encode(artistName, "UTF-8")
-            val searchUrl = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=8"
-            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
-            var searchReq = Request.Builder()
-                .url(searchUrl)
+            val url = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=6"
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
+            var request = Request.Builder()
+                .url(url)
                 .addHeader("Authorization", "Bearer $currentToken")
                 .get()
                 .build()
-            var resp = httpClient.newCall(searchReq).execute()
-            if (resp.code == 401) {
-                resp.close()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
                 val refreshed = refreshAndSaveToken()
                 if (!refreshed.isNullOrBlank()) {
                     currentToken = refreshed
-                    searchReq = Request.Builder()
-                        .url(searchUrl)
+                    request = Request.Builder()
+                        .url(url)
                         .addHeader("Authorization", "Bearer $currentToken")
                         .get()
                         .build()
-                    resp = httpClient.newCall(searchReq).execute()
-                } else {
-                    return@withContext emptyList()
+                    response = httpClient.newCall(request).execute()
                 }
             }
-            resp.use { response ->
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: ""
-                    val jsonElem = JsonParser.parseString(body)
-                    if (jsonElem.isJsonObject) {
-                        val artistsObj = jsonElem.asJsonObject.getObjectOrNull("artists")
-                        val items = artistsObj?.getArrayOrNull("items")
-                        if (items != null) {
-                            val normSeed = SearchUtils.normalize(artistName)
-                            for (i in 0 until items.size()) {
-                                val aObj = items.get(i)?.asJsonObject ?: continue
-                                val name = aObj.getStringOrNull("name") ?: continue
-                                val normName = SearchUtils.normalize(name)
-                                // Filter out self and duplicate matches (matching macOS logic)
-                                if (normName != normSeed && list.none { SearchUtils.normalize(it) == normName }) {
-                                    list.add(name)
-                                }
-                            }
-                        }
-                    }
+
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyList()
+            }
+
+            val body = response.body?.string() ?: "{}"
+            response.close()
+
+            val json = JsonParser.parseString(body).asJsonObject
+            val artistsObj = json.getObjectOrNull("artists") ?: return@withContext emptyList()
+            val items = artistsObj.getArrayOrNull("items") ?: return@withContext emptyList()
+
+            for (i in 0 until items.size()) {
+                val a = items.get(i)?.asJsonObject ?: continue
+                val name = a.getStringOrNull("name") ?: continue
+                if (!name.equals(artistName, ignoreCase = true) && !list.contains(name)) {
+                    list.add(name)
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.w("SpotifyCloudService", "fetchRelatedArtists error", e)
+            KikiLog.e("fetchRelatedArtists error", e)
         }
-        list.take(6)
+        list
+    }
+
+    suspend fun fetchAudioFeatures(accessToken: String, trackId: String): Map<String, Float> = withContext(Dispatchers.IO) {
+        val map = mutableMapOf<String, Float>()
+        try {
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyMap()
+            var request = Request.Builder()
+                .url("https://api.spotify.com/v1/audio-features/$trackId")
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url("https://api.spotify.com/v1/audio-features/$trackId")
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyMap()
+            }
+
+            val body = response.body?.string() ?: "{}"
+            response.close()
+
+            val json = JsonParser.parseString(body).asJsonObject
+            val energy = json.get("energy")?.asFloat ?: 0f
+            val danceability = json.get("danceability")?.asFloat ?: 0f
+            val valence = json.get("valence")?.asFloat ?: 0f
+            val tempo = json.get("tempo")?.asFloat ?: 0f
+            val acousticness = json.get("acousticness")?.asFloat ?: 0f
+
+            map["energy"] = energy
+            map["danceability"] = danceability
+            map["valence"] = valence
+            map["tempo"] = tempo
+            map["acousticness"] = acousticness
+        } catch (e: Exception) {
+            KikiLog.e("fetchAudioFeatures error", e)
+        }
+        map
     }
 
     /**
-     * Searches Spotify for top matching artist names for a query (e.g. "leon" -> ["León Gieco", "Leon Bridges", ...]).
+     * Searches Spotify for top matching artist names for a query.
      */
     suspend fun searchArtists(accessToken: String, query: String, limit: Int = 6): List<String> = withContext(Dispatchers.IO) {
         val list = mutableListOf<String>()
         try {
             val encoded = java.net.URLEncoder.encode(query, "UTF-8")
             val searchUrl = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=$limit"
-            var currentToken = activeAccessToken ?: accessToken.takeIf { it.isNotBlank() } ?: getValidToken() ?: return@withContext emptyList()
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
             val req = Request.Builder()
                 .url(searchUrl)
                 .addHeader("Authorization", "Bearer $currentToken")
@@ -948,7 +1167,7 @@ class SpotifyCloudService(
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.w("SpotifyCloudService", "searchArtists error", e)
+            KikiLog.w("searchArtists error: ${e.message}")
         }
         list
     }
@@ -960,9 +1179,10 @@ class SpotifyCloudService(
         val ids = mutableSetOf<String>()
         try {
             val url = "https://api.spotify.com/v1/me/player/recently-played?limit=50"
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptySet()
             val req = Request.Builder()
                 .url(url)
-                .addHeader("Authorization", "Bearer $accessToken")
+                .addHeader("Authorization", "Bearer $currentToken")
                 .get()
                 .build()
             httpClient.newCall(req).execute().use { resp ->
@@ -983,32 +1203,8 @@ class SpotifyCloudService(
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.w("SpotifyCloudService", "fetchRecentlyPlayedTrackIds error", e)
+            KikiLog.w("fetchRecentlyPlayedTrackIds error: ${e.message}")
         }
         ids
     }
 }
-
-data class SpotifyDevice(
-    val id: String,
-    val name: String,
-    val type: String,
-    val isActive: Boolean,
-    val volumePercent: Int = 100
-)
-
-data class SpotifyPlaybackState(
-    val isPlaying: Boolean,
-    val progressMs: Long,
-    val track: TrackEntity?,
-    val deviceName: String?,
-    val volumePercent: Int
-)
-
-sealed class PlaybackResult {
-    data object Success : PlaybackResult()
-    data object NoActiveDevice : PlaybackResult()
-    data object Unauthorized : PlaybackResult()
-    data class Error(val code: Int, val message: String) : PlaybackResult()
-}
-

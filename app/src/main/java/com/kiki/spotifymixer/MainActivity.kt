@@ -49,10 +49,11 @@ class MainActivity : ComponentActivity() {
         val database = AppDatabase.getInstance(applicationContext)
         repository = SpotifyMixerRepository(database)
         cloudService = SpotifyCloudService(repository)
+        val backupManager = com.kiki.spotifymixer.data.backup.LibraryBackupManager(applicationContext, cloudService, repository)
 
         // Initialize ViewModels
         queueViewModel = QueueViewModel(repository, cloudService)
-        libraryViewModel = LibraryViewModel(repository, cloudService)
+        libraryViewModel = LibraryViewModel(repository, cloudService, backupManager)
         playerViewModel = PlayerViewModel(repository, cloudService)
         playerViewModel.setApplicationContext(applicationContext)
         discoverViewModel = DiscoverViewModel(repository, cloudService)
@@ -196,6 +197,8 @@ class MainActivity : ComponentActivity() {
                             repository.setSetting("spotify_access_token", token)
                             libraryViewModel.setAccessToken(token)
                             playerViewModel.setAccessToken(token)
+                            discoverViewModel.setAccessToken(token)
+                            queueViewModel.setAccessToken(token)
                             libraryViewModel.syncLibrary()
                         }
                     }
