@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -63,6 +64,7 @@ fun LibraryScreen(
     likedSongsCount: Int,
     duplicateCount: Int,
     onSyncLibrary: () -> Unit,
+    onTriggerBackup: () -> Unit = {},
     onSelectPlaylistAsQueue: (PlaylistEntity) -> Unit,
     onAppendPlaylistToQueue: (PlaylistEntity) -> Unit,
     modifier: Modifier = Modifier
@@ -189,6 +191,16 @@ fun LibraryScreen(
                     title = Strings.DuplicatesDetected,
                     count = duplicateCount,
                     onClick = {}
+                )
+            }
+
+            item {
+                LibraryCategoryCard(
+                    icon = Icons.Default.Security,
+                    iconTint = Color(0xFFFFB74D),
+                    title = "Respaldo de Seguridad (Vault)",
+                    count = if (state.backupLikedCount > 0) state.backupLikedCount else likedSongsCount,
+                    onClick = onTriggerBackup
                 )
             }
 
