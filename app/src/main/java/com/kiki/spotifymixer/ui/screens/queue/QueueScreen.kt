@@ -27,10 +27,13 @@ import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shuffle
@@ -97,8 +100,11 @@ fun QueueScreen(
     onToggleAntiClumping: () -> Unit,
     onToggleLock: () -> Unit,
     onClearQueue: () -> Unit,
+    onSavePlaylist: () -> Unit = {},
     onSearchChange: (String) -> Unit,
     onTrackClick: (TrackEntity) -> Unit,
+    onLikeTrack: (TrackEntity) -> Unit = {},
+    likedTrackIds: Set<String> = emptySet(),
     onMoveTrack: (Int, Int) -> Unit,
     onClearMessage: () -> Unit,
     modifier: Modifier = Modifier
@@ -197,6 +203,19 @@ fun QueueScreen(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Save Queue as Playlist
+                    IconButton(
+                        onClick = onSavePlaylist,
+                        enabled = state.tracks.isNotEmpty()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlaylistAdd,
+                            contentDescription = "Guardar Playlist",
+                            tint = if (state.tracks.isNotEmpty()) SpotifyGreen else TextSecondary.copy(alpha = 0.4f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
                     // Lock Reorder Button
                     IconButton(onClick = onToggleLock) {
                         Icon(
@@ -367,6 +386,8 @@ fun QueueScreen(
                             dragOffsetY = if (isDragging) dragDropState.dragOffsetY else 0f,
                             itemHeightPx = itemHeightPx,
                             dragDropState = dragDropState,
+                            isLiked = likedTrackIds.contains(track.id),
+                            onLike = { onLikeTrack(track) },
                             onClick = { onTrackClick(track) },
                             onMoveUp = {
                                 if (index > 0) onMoveTrack(index, index - 1)
@@ -440,6 +461,8 @@ fun TrackRowItem(
     dragOffsetY: Float,
     itemHeightPx: Float,
     dragDropState: QueueDragDropState,
+    isLiked: Boolean = false,
+    onLike: () -> Unit = {},
     onClick: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
@@ -456,9 +479,7 @@ fun TrackRowItem(
                 translationY = if (isDragging) dragOffsetY else 0f
                 scaleX = if (isDragging) 1.04f else 1f
                 scaleY = if (isDragging) 1.04f else 1f
-                shadowElevation = if (isDragging) 24.dp.toPx() else 0f
-            }
-            .clickable { onClick() },
+            },
         shape = RoundedCornerShape(10.dp),
         border = when {
             isDragging -> BorderStroke(2.5.dp, SpotifyGreen)
@@ -479,61 +500,83 @@ fun TrackRowItem(
                 .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Index Number or Active Playing Indicator
-            if (isCurrentlyPlaying) {
-                Icon(
-                    imageVector = Icons.Default.VolumeUp,
-                    contentDescription = "Playing",
-                    tint = SpotifyGreen,
+            // Track Info clickable area (Index + Art + Title/Artist)
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { onClick() },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Index Number or Active Playing Indicator
+                if (isCurrentlyPlaying) {
+                    Icon(
+                        imageVector = Icons.Default.VolumeUp,
+                        contentDescription = "Playing",
+                        tint = SpotifyGreen,
+                        modifier = Modifier
+                            .width(24.dp)
+                            .size(18.dp)
+                    )
+                } else {
+                    Text(
+                        text = "$index",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isDragging) SpotifyGreen else TextMuted,
+                        modifier = Modifier.width(24.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                // Album art placeholder
+                Box(
                     modifier = Modifier
-                        .width(24.dp)
-                        .size(18.dp)
-                )
-            } else {
-                Text(
-                    text = "$index",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isDragging) SpotifyGreen else TextMuted,
-                    modifier = Modifier.width(24.dp)
-                )
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (isCurrentlyPlaying || isDragging) SpotifyGreen.copy(alpha = 0.25f) else BgSurface2),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = null,
+                        tint = if (isCurrentlyPlaying || isDragging) SpotifyGreen else TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                // Title and Artist
+                Column(modifier = Modifier.weight(1f).padding(end = 4.dp)) {
+                    Text(
+                        text = track.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (isCurrentlyPlaying || isDragging) FontWeight.Bold else FontWeight.SemiBold,
+                        color = if (isCurrentlyPlaying || isDragging) SpotifyGreen else TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${track.artist} • ${track.album}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isCurrentlyPlaying) TextPrimary.copy(alpha = 0.8f) else TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.width(4.dp))
-
-            // Album art placeholder
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (isCurrentlyPlaying || isDragging) SpotifyGreen.copy(alpha = 0.25f) else BgSurface2),
-                contentAlignment = Alignment.Center
+            // Like / Favorite Button
+            IconButton(
+                onClick = onLike,
+                modifier = Modifier.size(32.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = if (isCurrentlyPlaying || isDragging) SpotifyGreen else TextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            // Title and Artist
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (isCurrentlyPlaying || isDragging) FontWeight.Bold else FontWeight.SemiBold,
-                    color = if (isCurrentlyPlaying || isDragging) SpotifyGreen else TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${track.artist} • ${track.album}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isCurrentlyPlaying) TextPrimary.copy(alpha = 0.8f) else TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    imageVector = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = if (isLiked) "Quitar de Me gusta" else "Guardar en Me gusta",
+                    tint = if (isLiked) SpotifyGreen else TextSecondary.copy(alpha = 0.6f),
+                    modifier = Modifier.size(18.dp)
                 )
             }
 

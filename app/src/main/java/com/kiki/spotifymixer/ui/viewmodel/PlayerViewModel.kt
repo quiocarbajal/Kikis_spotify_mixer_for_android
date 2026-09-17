@@ -418,36 +418,57 @@ class PlayerViewModel(
 
     fun saveCurrentTrackToLiked(onFeedback: ((String) -> Unit)? = null) {
         val track = _uiState.value.currentTrack ?: return
-        saveTrackToLiked(track, onFeedback)
+        toggleTrackLiked(track, onFeedback)
     }
 
     fun saveTrackToLiked(track: TrackEntity, onFeedback: ((String) -> Unit)? = null) {
+        toggleTrackLiked(track, onFeedback)
+    }
+
+    fun toggleTrackLiked(track: TrackEntity, onFeedback: ((String) -> Unit)? = null) {
         viewModelScope.launch {
-            android.util.Log.d("PlayerViewModel", "saveTrackToLiked: ${track.title} id=${track.id}")
             val repo = repository
-            if (repo != null && (cachedLikedSet.contains(track.id) || repo.isTrackInLiked(track.id))) {
-                android.util.Log.d("PlayerViewModel", "Track ${track.title} is already liked, skipping add")
-                onFeedback?.invoke("Ya está en tus Canciones que te gustan")
-                return@launch
-            }
-
-            cachedLikedSet = cachedLikedSet + track.id
-            _uiState.update { current ->
-                if (current.currentTrack?.id == track.id) {
-                    current.copy(isLiked = true)
-                } else current
-            }
-
+            val isCurrentlyLiked = cachedLikedSet.contains(track.id) || (repo?.isTrackInLiked(track.id) == true)
             val token = getValidAccessToken()
-            if (!token.isNullOrBlank() && cloudService != null) {
-                cloudService.saveTrackToLiked(token, track.id)
-            }
+            android.util.Log.d("PlayerViewModel", "toggleTrackLiked: trackId=${track.id}, isCurrentlyLiked=$isCurrentlyLiked, tokenPresent=${!token.isNullOrBlank()}, tokenLen=${token?.length ?: 0}")
 
-            if (repo != null) {
-                repo.saveTrackToLiked(track)
-            }
+            if (isCurrentlyLiked) {
+                // UNLIKE: Remove from Spotify and local storage
+                cachedLikedSet = cachedLikedSet - track.id
+                _uiState.update { current ->
+                    if (current.currentTrack?.id == track.id) {
+                        current.copy(isLiked = false)
+                    } else current
+                }
 
-            onFeedback?.invoke("¡Agregada a Canciones que te gustan!")
+                if (!token.isNullOrBlank() && cloudService != null) {
+                    val cloudResult = cloudService.removeTrackFromLiked(token, track.id)
+                    android.util.Log.d("PlayerViewModel", "removeTrackFromLiked cloudResult=$cloudResult for trackId=${track.id}")
+                } else {
+                    android.util.Log.w("PlayerViewModel", "SKIPPED cloud removeTrackFromLiked: token isBlank=${token.isNullOrBlank()}, cloudService isNull=${cloudService == null}")
+                }
+                repo?.removeTrackFromLiked(track.id)
+                android.util.Log.d("PlayerViewModel", "repo removeTrackFromLiked done for trackId=${track.id}")
+                onFeedback?.invoke("Eliminada de tus Canciones que te gustan")
+            } else {
+                // LIKE: Add to Spotify and local storage
+                cachedLikedSet = cachedLikedSet + track.id
+                _uiState.update { current ->
+                    if (current.currentTrack?.id == track.id) {
+                        current.copy(isLiked = true)
+                    } else current
+                }
+
+                if (!token.isNullOrBlank() && cloudService != null) {
+                    val cloudResult = cloudService.saveTrackToLiked(token, track.id)
+                    android.util.Log.d("PlayerViewModel", "saveTrackToLiked cloudResult=$cloudResult for trackId=${track.id}")
+                } else {
+                    android.util.Log.w("PlayerViewModel", "SKIPPED cloud saveTrackToLiked: token isBlank=${token.isNullOrBlank()}, cloudService isNull=${cloudService == null}")
+                }
+                repo?.saveTrackToLiked(track)
+                android.util.Log.d("PlayerViewModel", "repo saveTrackToLiked done for trackId=${track.id}")
+                onFeedback?.invoke("¡Agregada a Canciones que te gustan!")
+            }
         }
     }
 

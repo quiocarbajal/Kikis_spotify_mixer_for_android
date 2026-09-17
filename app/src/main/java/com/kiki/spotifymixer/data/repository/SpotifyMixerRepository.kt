@@ -46,6 +46,14 @@ class SpotifyMixerRepository(private val db: AppDatabase) {
         }
     }
 
+    suspend fun removeTrackFromLiked(trackId: String) = withContext(Dispatchers.IO) {
+        if (playlistTrackDao.isTrackInLiked(trackId)) {
+            playlistTrackDao.deleteTrackFromPlaylist("liked_songs", trackId)
+            val currentCount = playlistDao.getPlaylistById("liked_songs")?.totalTracks ?: 1
+            playlistDao.updateTrackCount("liked_songs", (currentCount - 1).coerceAtLeast(0))
+        }
+    }
+
     // --- Tracks ---
     val totalTrackCount: Flow<Int> = trackDao.getTotalTrackCount()
 

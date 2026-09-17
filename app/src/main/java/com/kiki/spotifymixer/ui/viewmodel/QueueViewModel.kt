@@ -349,4 +349,108 @@ class QueueViewModel(
     fun clearUserMessage() {
         _uiState.update { it.copy(userMessage = null) }
     }
+
+    /**
+     * Creates a new playlist on Spotify and saves the active queue into it.
+     */
+    fun saveQueueAsNewPlaylist(
+        name: String,
+        description: String = "Created with Kiki's Spotify Mixer",
+        onSuccess: (String) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val tracks = _uiState.value.tracks
+        if (tracks.isEmpty()) {
+            val msg = "La cola está vacía."
+            _uiState.update { it.copy(userMessage = msg) }
+            onError(msg)
+            return
+        }
+
+        viewModelScope.launch {
+            val token = getValidAccessToken()
+            android.util.Log.d("QueueViewModel", "saveQueueAsNewPlaylist: tokenPresent=${!token.isNullOrBlank()}, tokenLen=${token?.length ?: 0}, trackCount=${tracks.size}")
+            if (token.isNullOrBlank() || cloudService == null) {
+                val msg = "No se pudo autenticar con Spotify."
+                android.util.Log.e("QueueViewModel", "saveQueueAsNewPlaylist ABORTED: token isBlank=${token.isNullOrBlank()}, cloudService isNull=${cloudService == null}")
+                _uiState.update { it.copy(userMessage = msg) }
+                onError(msg)
+                return@launch
+            }
+
+            val playlistId = cloudService.createPlaylist(token, name, description)
+            android.util.Log.d("QueueViewModel", "createPlaylist result: playlistId=$playlistId")
+            if (playlistId.isNullOrBlank()) {
+                val msg = "No se pudo crear la playlist en Spotify."
+                _uiState.update { it.copy(userMessage = msg) }
+                onError(msg)
+                return@launch
+            }
+
+            val uris = tracks.map { it.uri }
+            android.util.Log.d("QueueViewModel", "replacePlaylistTracks: playlistId=$playlistId, uriCount=${uris.size}, sampleUri=${uris.firstOrNull()}")
+            val ok = cloudService.replacePlaylistTracks(token, playlistId, uris)
+            android.util.Log.d("QueueViewModel", "replacePlaylistTracks result: ok=$ok")
+            if (ok) {
+                val newEntity = com.kiki.spotifymixer.data.local.entity.PlaylistEntity(
+                    id = playlistId,
+                    name = name,
+                    description = description,
+                    totalTracks = tracks.size,
+                    isCustom = true
+                )
+                repository.upsertPlaylist(newEntity)
+                repository.setPlaylistTracks(playlistId, tracks.map { it.id })
+                _uiState.update { it.copy(userMessage = "¡Playlist \"$name\" creada con éxito!") }
+                onSuccess(name)
+            } else {
+                val msg = "Se creó la playlist pero no se pudieron agregar las canciones."
+                _uiState.update { it.copy(userMessage = msg) }
+                onError(msg)
+            }
+        }
+    }
+
+    /**
+     * Overwrites an existing Spotify playlist with the tracks in the current queue.
+     */
+    fun overwritePlaylistWithQueue(
+        playlist: com.kiki.spotifymixer.data.local.entity.PlaylistEntity,
+        onSuccess: (String) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val tracks = _uiState.value.tracks
+        if (tracks.isEmpty()) {
+            val msg = "La cola está vacía."
+            _uiState.update { it.copy(userMessage = msg) }
+            onError(msg)
+            return
+        }
+
+        viewModelScope.launch {
+            val token = getValidAccessToken()
+            android.util.Log.d("QueueViewModel", "overwritePlaylistWithQueue: playlistId=${playlist.id}, tokenPresent=${!token.isNullOrBlank()}, tokenLen=${token?.length ?: 0}, trackCount=${tracks.size}")
+            if (token.isNullOrBlank() || cloudService == null) {
+                val msg = "No se pudo autenticar con Spotify."
+                android.util.Log.e("QueueViewModel", "overwritePlaylistWithQueue ABORTED: token isBlank=${token.isNullOrBlank()}, cloudService isNull=${cloudService == null}")
+                _uiState.update { it.copy(userMessage = msg) }
+                onError(msg)
+                return@launch
+            }
+
+            val uris = tracks.map { it.uri }
+            android.util.Log.d("QueueViewModel", "replacePlaylistTracks for overwrite: playlistId=${playlist.id}, uriCount=${uris.size}, sampleUri=${uris.firstOrNull()}")
+            val ok = cloudService.replacePlaylistTracks(token, playlist.id, uris)
+            android.util.Log.d("QueueViewModel", "replacePlaylistTracks for overwrite result: ok=$ok")
+            if (ok) {
+                repository.setPlaylistTracks(playlist.id, tracks.map { it.id })
+                _uiState.update { it.copy(userMessage = "¡Playlist \"${playlist.name}\" actualizada con éxito!") }
+                onSuccess(playlist.name)
+            } else {
+                val msg = "Error al sobrescribir la playlist en Spotify."
+                _uiState.update { it.copy(userMessage = msg) }
+                onError(msg)
+            }
+        }
+    }
 }

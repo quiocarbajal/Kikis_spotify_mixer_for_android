@@ -19,6 +19,9 @@ interface PlaylistTrackDao {
     @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId AND track_id = :trackId AND order_index = :orderIndex")
     suspend fun deleteTrackAtPosition(playlistId: String, trackId: String, orderIndex: Int)
 
+    @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId AND track_id = :trackId")
+    suspend fun deleteTrackFromPlaylist(playlistId: String, trackId: String)
+
     @Query("SELECT MAX(order_index) FROM playlist_tracks WHERE playlist_id = :playlistId")
     suspend fun getMaxOrderIndex(playlistId: String): Int?
 

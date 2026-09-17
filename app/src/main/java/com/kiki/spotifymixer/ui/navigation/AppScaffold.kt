@@ -82,6 +82,7 @@ fun AppScaffold(
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var isSettingsOpen by remember { mutableStateOf(false) }
+    var isSavePlaylistOpen by remember { mutableStateOf(false) }
 
     val queueState by queueViewModel.uiState.collectAsState()
     val filteredTracks by queueViewModel.filteredTracks.collectAsState()
@@ -317,10 +318,15 @@ fun AppScaffold(
                     onToggleAntiClumping = { queueViewModel.toggleAntiClumping() },
                     onToggleLock = { queueViewModel.toggleLock() },
                     onClearQueue = { queueViewModel.clearQueue() },
+                    onSavePlaylist = { isSavePlaylistOpen = true },
                     onSearchChange = { queueViewModel.setSearchQuery(it) },
                     onTrackClick = { clickedTrack ->
                         playerViewModel.playTrack(clickedTrack)
                     },
+                    onLikeTrack = { track ->
+                        playerViewModel.toggleTrackLiked(track)
+                    },
+                    likedTrackIds = likedTrackIds,
                     onMoveTrack = { from, to ->
                         if (from in filteredTracks.indices && to in filteredTracks.indices) {
                             queueViewModel.reorderTracks(filteredTracks[from].id, filteredTracks[to].id)
@@ -335,6 +341,7 @@ fun AppScaffold(
                     likedSongsCount = likedSongsCount,
                     duplicateCount = duplicateTracks.size,
                     onSyncLibrary = { libraryViewModel.syncLibrary(onNeedAuth = onConnectSpotify) },
+                    onTriggerBackup = { libraryViewModel.triggerManualBackup(onNeedAuth = onConnectSpotify) },
                     onSelectPlaylistAsQueue = { playlist ->
                         queueViewModel.loadPlaylistIntoQueue(playlist.id, playlist.name)
                         selectedTab = 0 // Auto-switch to Queue tab to see loaded tracks
@@ -439,6 +446,42 @@ fun AppScaffold(
             onLogout = {
                 libraryViewModel.logout()
                 playerViewModel.clearAccessToken()
+            }
+        )
+    }
+
+    // Safety Backup Alert Dialog (First Login)
+    if (libraryState.showBackupSafetyDialog) {
+        com.kiki.spotifymixer.ui.dialogs.BackupSafetyDialog(
+            totalLikedTracks = libraryState.backupLikedCount,
+            totalPlaylists = libraryState.backupPlaylistCount,
+            onShareBackup = {
+                val intent = libraryViewModel.createShareBackupIntent()
+                if (intent != null) {
+                    context.startActivity(android.content.Intent.createChooser(intent, "Guardar Respaldo de Seguridad"))
+                }
+            },
+            onDismiss = {
+                libraryViewModel.dismissBackupSafetyDialog()
+            }
+        )
+    }
+
+    // Save Queue to Playlist Dialog
+    if (isSavePlaylistOpen) {
+        com.kiki.spotifymixer.ui.dialogs.SavePlaylistDialog(
+            queueTrackCount = queueState.tracks.size,
+            existingPlaylists = playlists,
+            onSaveAsNew = { name, desc ->
+                isSavePlaylistOpen = false
+                queueViewModel.saveQueueAsNewPlaylist(name, desc)
+            },
+            onOverwriteExisting = { playlist ->
+                isSavePlaylistOpen = false
+                queueViewModel.overwritePlaylistWithQueue(playlist)
+            },
+            onDismiss = {
+                isSavePlaylistOpen = false
             }
         )
     }
