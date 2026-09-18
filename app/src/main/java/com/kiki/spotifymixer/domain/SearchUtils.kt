@@ -75,7 +75,8 @@ object SearchUtils {
 
     /**
      * Checks if a single target token matches a query token allowing up to maxDistance edits.
-     * For queries <= 2 characters, strictly requires exact prefix/substring to avoid false positives.
+     * For short tokens (<= 3 characters in either query or target), strictly requires exact
+     * prefix or contains to prevent false positives (e.g. "leon" matching "leo", "and" matching "van").
      */
     fun matchesToken(queryToken: String, targetToken: String, maxDistance: Int = 1): Boolean {
         if (queryToken.isEmpty()) return true
@@ -86,8 +87,9 @@ object SearchUtils {
             return true
         }
 
-        // For very short query tokens (<= 2 chars), don't allow fuzzy edits
-        if (queryToken.length <= 2) {
+        // For short tokens (<= 3 chars in either query or target), don't allow fuzzy edits
+        // e.g. "leon" should never match "leo", "and" should never match "van"
+        if (queryToken.length <= 3 || targetToken.length <= 3) {
             return false
         }
 
@@ -130,7 +132,7 @@ object SearchUtils {
      * Supports:
      *  - Exact substring / prefix matches (normalized)
      *  - Multi-token queries where each token matches at least one target token
-     *  - 1-character typo tolerance for tokens with length >= 3
+     *  - 1-character typo tolerance for tokens with length >= 4
      */
     fun fuzzyMatches(query: String, target: String, maxDistance: Int = 1): Boolean {
         val qNorm = normalize(query)
@@ -141,8 +143,8 @@ object SearchUtils {
         // 1. Direct normalized substring match (handles 90% of cases instantly)
         if (tNorm.contains(qNorm)) return true
 
-        // 2. Direct full-string edit distance
-        if (qNorm.length > 2 && abs(qNorm.length - tNorm.length) <= maxDistance) {
+        // 2. Direct full-string edit distance (both strings must have length >= 4 to avoid short-string collisions like "leon" vs "leo")
+        if (qNorm.length > 3 && tNorm.length > 3 && abs(qNorm.length - tNorm.length) <= maxDistance) {
             if (levenshteinDistance(qNorm, tNorm) <= maxDistance) return true
         }
 
@@ -186,7 +188,7 @@ object SearchUtils {
         for (qTok in qTokens) {
             for (tTok in tTokens) {
                 val len = min(qTok.length, tTok.length)
-                if (len > 2) {
+                if (len > 3) {
                     val dist = levenshteinDistance(qTok, tTok.take(len))
                     if (dist < minDistance) minDistance = dist
                 }

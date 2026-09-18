@@ -39,12 +39,18 @@ class SearchUtilsTest {
 
     @Test
     fun testFuzzyMatchesOneCharacterTypo() {
-        // 1-character typo tolerance
+        // 1-character typo tolerance for tokens with length >= 4
         assertTrue("leom should match León Gieco", SearchUtils.fuzzyMatches("leom", "León Gieco"))
-        assertTrue("len should match León Gieco", SearchUtils.fuzzyMatches("len", "León Gieco"))
         assertTrue("gieko should match León Gieco", SearchUtils.fuzzyMatches("gieko", "León Gieco"))
         assertTrue("giek should match León Gieco", SearchUtils.fuzzyMatches("giek", "León Gieco"))
         assertTrue("charly gartia should match Charly García", SearchUtils.fuzzyMatches("charly gartia", "Charly García"))
+
+        // Short tokens (<= 3 chars) must NOT fuzzy match words of different lengths
+        assertFalse("len (3 chars) should not match León Gieco", SearchUtils.fuzzyMatches("len", "León Gieco"))
+        assertFalse("leon should not match leo", SearchUtils.fuzzyMatches("leon", "leo"))
+        assertFalse("leo should not match leon via typo distance", SearchUtils.matchesToken("leon", "leo"))
+        assertFalse("León Gieco should not match Leo Mattioli", SearchUtils.fuzzyMatches("León Gieco", "Leo Mattioli"))
+        assertFalse("Leo Mattioli should not match León Gieco", SearchUtils.fuzzyMatches("Leo Mattioli", "León Gieco"))
     }
 
     @Test
