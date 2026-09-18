@@ -355,27 +355,21 @@ class DiscoverViewModel(
             val token = getValidAccessToken()
             if (!token.isNullOrBlank() && cloudService != null && query.isNotBlank()) {
                 try {
+                    val cleanQuery = SpotifyCloudService.sanitizeQuery(query)
                     val spotifyQuery = when (state.catalogSearchType) {
-                        CatalogSearchType.ALL -> query
-                        CatalogSearchType.ARTIST -> "artist:$query"
-                        CatalogSearchType.TRACK -> "track:$query"
-                        CatalogSearchType.LYRICS -> query
+                        CatalogSearchType.ALL -> cleanQuery
+                        CatalogSearchType.ARTIST -> "artist:\"$cleanQuery\""
+                        CatalogSearchType.TRACK -> "track:\"$cleanQuery\""
+                        CatalogSearchType.LYRICS -> cleanQuery
                     }
-                    val queryVariants = mutableListOf(spotifyQuery)
-                    if (state.catalogSearchType == CatalogSearchType.ARTIST) {
-                        queryVariants.add("artist:\"$query\"")
-                        queryVariants.add(query)
-                    }
-                    for (qVar in queryVariants.distinct()) {
-                        for (offset in listOf(0, 10, 20)) {
-                            val cloudResults = cloudService.searchTracks(token, qVar, limit = 10, offset = offset)
-                            for (t in cloudResults) {
-                                if (seenIds.add(t.id)) {
-                                    candidates.add(t)
-                                }
+                    for (offset in listOf(0, 10, 20)) {
+                        val cloudResults = cloudService.searchTracks(token, spotifyQuery, limit = 10, offset = offset)
+                        for (t in cloudResults) {
+                            if (seenIds.add(t.id)) {
+                                candidates.add(t)
                             }
-                            if (cloudResults.size < 10) break
                         }
+                        if (cloudResults.size < 10) break
                     }
                 } catch (e: Exception) {
                     android.util.Log.w("DiscoverVM", "Cloud catalog search error", e)
@@ -384,8 +378,14 @@ class DiscoverViewModel(
                 try {
                     for (mod in modifiers) {
                         if (mod.modifier == ChipModifier.INCLUDE) {
+                            val cleanMod = SpotifyCloudService.sanitizeQuery(mod.term)
+                            val modQuery = when (state.catalogSearchType) {
+                                CatalogSearchType.ARTIST -> "artist:\"$cleanMod\""
+                                CatalogSearchType.TRACK -> "track:\"$cleanMod\""
+                                else -> cleanMod
+                            }
                             for (offset in listOf(0, 10, 20)) {
-                                val cloudResults = cloudService.searchTracks(token, mod.term, limit = 10, offset = offset)
+                                val cloudResults = cloudService.searchTracks(token, modQuery, limit = 10, offset = offset)
                                 for (t in cloudResults) {
                                     if (seenIds.add(t.id)) {
                                         candidates.add(t)
@@ -841,26 +841,15 @@ class DiscoverViewModel(
 
                         // Artist Seeds (Depth 0: direct catalog tracks)
                         for (artist in includedArtists) {
-                            val norm = artist.lowercase().trim()
+                            val cleanArtist = SpotifyCloudService.sanitizeQuery(artist)
+                            val norm = cleanArtist.lowercase().trim()
                             if (visitedArtists.contains(norm)) continue
                             visitedArtists.add(norm)
 
-                            for (offset in listOf(0, 10, 20, 30, 40)) {
+                            for (offset in listOf(0, 10, 20, 30, 40, 50)) {
                                 initialJobs.add(async {
                                     try {
-                                        cloudService.searchTracks(token, "artist:\"$artist\"", limit = 10, offset = offset)
-                                    } catch (_: Exception) { emptyList() }
-                                })
-                            }
-                            for (offset in listOf(0, 10)) {
-                                initialJobs.add(async {
-                                    try {
-                                        cloudService.searchTracks(token, "artist:$artist", limit = 10, offset = offset)
-                                    } catch (_: Exception) { emptyList() }
-                                })
-                                initialJobs.add(async {
-                                    try {
-                                        cloudService.searchTracks(token, artist, limit = 10, offset = offset)
+                                        cloudService.searchTracks(token, "artist:\"$cleanArtist\"", limit = 10, offset = offset)
                                     } catch (_: Exception) { emptyList() }
                                 })
                             }
@@ -868,17 +857,11 @@ class DiscoverViewModel(
 
                         // Genre Seeds
                         for (genre in includedGenres) {
+                            val cleanGenre = SpotifyCloudService.sanitizeQuery(genre)
                             for (offset in listOf(0, 10, 20)) {
                                 initialJobs.add(async {
                                     try {
-                                        cloudService.searchTracks(token, "genre:\"$genre\"", limit = 10, offset = offset)
-                                    } catch (_: Exception) { emptyList() }
-                                })
-                            }
-                            for (offset in listOf(0, 10)) {
-                                initialJobs.add(async {
-                                    try {
-                                        cloudService.searchTracks(token, genre, limit = 10, offset = offset)
+                                        cloudService.searchTracks(token, "genre:\"$cleanGenre\"", limit = 10, offset = offset)
                                     } catch (_: Exception) { emptyList() }
                                 })
                             }
@@ -886,10 +869,11 @@ class DiscoverViewModel(
 
                         // Song Seeds
                         for (trackSeed in includedTracks) {
+                            val cleanSeed = SpotifyCloudService.sanitizeQuery(trackSeed)
                             for (offset in listOf(0, 10)) {
                                 initialJobs.add(async {
                                     try {
-                                        cloudService.searchTracks(token, trackSeed, limit = 10, offset = offset)
+                                        cloudService.searchTracks(token, "track:\"$cleanSeed\"", limit = 10, offset = offset)
                                     } catch (_: Exception) { emptyList() }
                                 })
                             }
@@ -933,11 +917,30 @@ class DiscoverViewModel(
                             }
                         }
 
-                        // Await initial batch and add valid candidates
+                        // Await initial batch, add valid candidates, and harvest co-artists
                         val initialTracks = initialJobs.awaitAll().flatten()
-                        initialTracks.forEach { addCandidate(it) }
+                        val discoveredCollaborators = mutableSetOf<String>()
 
-                        // 2. Depth 1 Orbit Expansion (1st degree related artists)
+                        initialTracks.forEach { track ->
+                            val trackArtists = SearchUtils.splitArtists(track.artist)
+                            val matchesSeedArtist = includedArtists.isEmpty() || includedArtists.any { seed ->
+                                trackArtists.any { SearchUtils.fuzzyMatches(seed, it) }
+                            }
+                            if (matchesSeedArtist) {
+                                addCandidate(track)
+                                // Harvest co-artists and collaborators ONLY from tracks where seed artist actually appears
+                                for (p in trackArtists) {
+                                    val cleanP = SpotifyCloudService.sanitizeQuery(p).trim()
+                                    val normP = cleanP.lowercase()
+                                    val isSelf = includedArtists.any { SearchUtils.fuzzyMatches(it, cleanP) }
+                                    val isExcluded = excludedArtists.any { it.equals(normP, ignoreCase = true) || SearchUtils.fuzzyMatches(it, normP) }
+                                    if (!isSelf && !isExcluded && cleanP.length > 2 && !visitedArtists.contains(normP)) {
+                                        discoveredCollaborators.add(cleanP)
+                                    }
+                                }
+                            }
+                        }
+
                         // Target candidate buffer to ensure enough variety for capping and anti-clumping
                         val targetBuffer = targetCount * 2
                         val seedArtists = if (includedArtists.isNotEmpty()) {
@@ -946,77 +949,94 @@ class DiscoverViewModel(
                             candidates.map { it.artist }.distinct().take(6)
                         }
 
-                        val depth1Artists = mutableListOf<String>()
+                        // --- TIER 1 (Priority 1): Artist Genres Discovery ---
+                        // Fetch genuine Spotify genres from the Artist Profile and query matching genre tracks
                         if (candidates.size < targetBuffer && seedArtists.isNotEmpty()) {
+                            val artistGenres = mutableListOf<String>()
                             for (seed in seedArtists) {
                                 try {
-                                    val rel = cloudService.fetchRelatedArtists(token, seed).toMutableList()
-                                    if (rel.size < 3) {
-                                        val more = cloudService.searchArtists(token, seed, limit = 6)
-                                        for (m in more) {
-                                            if (!rel.any { it.equals(m, ignoreCase = true) } && !m.equals(seed, ignoreCase = true)) {
-                                                rel.add(m)
+                                    val genres = cloudService.fetchArtistGenres(token, seed)
+                                    for (g in genres) {
+                                        val cleanG = SpotifyCloudService.sanitizeQuery(g).trim()
+                                        if (cleanG.isNotBlank() && !artistGenres.contains(cleanG)) {
+                                            val normG = cleanG.lowercase()
+                                            if (!excludedGenres.any { it.equals(normG, ignoreCase = true) || SearchUtils.fuzzyMatches(it, normG) }) {
+                                                artistGenres.add(cleanG)
                                             }
                                         }
                                     }
-                                    for (r in rel) {
-                                        val rNorm = r.lowercase().trim()
-                                        if (visitedArtists.add(rNorm) && !excludedArtists.any { it.equals(rNorm, ignoreCase = true) || SearchUtils.fuzzyMatches(it, rNorm) }) {
-                                            depth1Artists.add(r)
-                                        }
-                                    }
                                 } catch (_: Exception) {}
                             }
 
-                            android.util.Log.d("DiscoverVM", "Discovered ${depth1Artists.size} Depth-1 related artists: $depth1Artists")
+                            android.util.Log.d("DiscoverVM", "Discovered Tier-1 artist genres: $artistGenres")
 
-                            val d1Jobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
-                            for (rel in depth1Artists.take(12)) {
-                                for (offset in listOf(0, 10, 20)) {
-                                    d1Jobs.add(async {
-                                        try {
-                                            cloudService.searchTracks(token, "artist:\"$rel\"", limit = 10, offset = offset)
-                                        } catch (_: Exception) { emptyList() }
-                                    })
-                                }
-                            }
-                            val d1Tracks = d1Jobs.awaitAll().flatten()
-                            d1Tracks.forEach { addCandidate(it) }
-                        }
-
-                        // 3. Depth 2 Orbit Expansion (Peers of peers: 2nd degree related artists)
-                        // If candidates are still below targetBuffer and we have depth1 artists
-                        if (candidates.size < targetBuffer && depth1Artists.isNotEmpty()) {
-                            val depth2Artists = mutableListOf<String>()
-                            for (d1 in depth1Artists.take(8)) {
-                                if (candidates.size >= targetBuffer) break
-                                try {
-                                    val rel2 = cloudService.fetchRelatedArtists(token, d1)
-                                    for (r2 in rel2) {
-                                        val r2Norm = r2.lowercase().trim()
-                                        if (visitedArtists.add(r2Norm) && !excludedArtists.any { it.equals(r2Norm, ignoreCase = true) || SearchUtils.fuzzyMatches(it, r2Norm) }) {
-                                            depth2Artists.add(r2)
-                                        }
-                                    }
-                                } catch (_: Exception) {}
-                            }
-
-                            android.util.Log.d("DiscoverVM", "Discovered ${depth2Artists.size} Depth-2 related artists: $depth2Artists")
-
-                            if (depth2Artists.isNotEmpty()) {
-                                val d2Jobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
-                                for (rel2 in depth2Artists.take(15)) {
+                            if (artistGenres.isNotEmpty()) {
+                                val genreJobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+                                for (g in artistGenres.take(4)) {
                                     for (offset in listOf(0, 10, 20)) {
-                                        d2Jobs.add(async {
+                                        genreJobs.add(async {
                                             try {
-                                                cloudService.searchTracks(token, "artist:\"$rel2\"", limit = 10, offset = offset)
+                                                cloudService.searchTracks(token, "genre:\"$g\"", limit = 10, offset = offset)
                                             } catch (_: Exception) { emptyList() }
                                         })
                                     }
                                 }
-                                val d2Tracks = d2Jobs.awaitAll().flatten()
-                                d2Tracks.forEach { addCandidate(it) }
+                                val genreTracks = genreJobs.awaitAll().flatten()
+                                genreTracks.forEach { addCandidate(it) }
                             }
+                        }
+
+                        // --- TIER 2 (Priority 2): Co-Artists & Collaborators ---
+                        // Harvest tracks from direct musical collaborators discovered on seed tracks
+                        if (candidates.size < targetBuffer && discoveredCollaborators.isNotEmpty()) {
+                            val collabList = discoveredCollaborators
+                                .filter { visitedArtists.add(it.lowercase().trim()) }
+                                .take(8)
+
+                            android.util.Log.d("DiscoverVM", "Harvesting Tier-2 collaborators: $collabList")
+
+                            val collabJobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+                            for (collab in collabList) {
+                                val cleanCollab = SpotifyCloudService.sanitizeQuery(collab)
+                                for (offset in listOf(0, 10, 20)) {
+                                    collabJobs.add(async {
+                                        try {
+                                            cloudService.searchTracks(token, "artist:\"$cleanCollab\"", limit = 10, offset = offset)
+                                        } catch (_: Exception) { emptyList() }
+                                    })
+                                }
+                            }
+                            val collabTracks = collabJobs.awaitAll().flatten()
+                            collabTracks.forEach { addCandidate(it) }
+                        }
+
+                        // --- TIER 3 (Priority 3): Curated Thematic Playlists ---
+                        // Search public/curated playlists containing the seed artist and harvest sample tracks
+                        if (candidates.size < targetBuffer && seedArtists.isNotEmpty()) {
+                            val playlistIds = mutableListOf<String>()
+                            for (seed in seedArtists) {
+                                try {
+                                    val pIds = cloudService.searchPlaylists(token, seed, limit = 4)
+                                    for (pid in pIds) {
+                                        if (!playlistIds.contains(pid)) {
+                                            playlistIds.add(pid)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            android.util.Log.d("DiscoverVM", "Harvesting Tier-3 playlists: ${playlistIds.size} playlists")
+
+                            val playlistJobs = mutableListOf<kotlinx.coroutines.Deferred<List<TrackEntity>>>()
+                            for (pid in playlistIds.take(4)) {
+                                playlistJobs.add(async {
+                                    try {
+                                        cloudService.fetchPlaylistSampleTracks(token, pid, limit = 25)
+                                    } catch (_: Exception) { emptyList() }
+                                })
+                            }
+                            val playlistTracks = playlistJobs.awaitAll().flatten()
+                            playlistTracks.forEach { addCandidate(it) }
                         }
                     }
                 }
@@ -1064,10 +1084,22 @@ class DiscoverViewModel(
             val artistCounts = mutableMapOf<String, Int>()
             val overflowTracks = mutableListOf<TrackEntity>()
 
+            val isSeedArtist = { art: String ->
+                includedArtists.isEmpty() || includedArtists.any { SearchUtils.fuzzyMatches(it, art) }
+            }
+            // Non-seed / related artists are strictly capped at at most 2 tracks tops
+            val hardMaxPerNonSeedArtist = 2
+
+            fun getPrimaryArtist(raw: String): String {
+                val parts = SearchUtils.splitArtists(raw)
+                return if (parts.size > 1) parts[1].lowercase().trim() else raw.lowercase().trim()
+            }
+
             for (t in workingPool) {
-                val normArtist = t.artist.lowercase().trim()
+                val normArtist = getPrimaryArtist(t.artist)
                 val cnt = artistCounts.getOrDefault(normArtist, 0)
-                if (cnt < maxPerArtist) {
+                val initialLimit = if (isSeedArtist(t.artist)) maxPerArtist else hardMaxPerNonSeedArtist
+                if (cnt < initialLimit) {
                     diverseSelection.add(t)
                     artistCounts[normArtist] = cnt + 1
                 } else {
@@ -1077,7 +1109,13 @@ class DiscoverViewModel(
 
             for (ot in overflowTracks) {
                 if (diverseSelection.size >= targetCount) break
-                diverseSelection.add(ot)
+                val normArtist = getPrimaryArtist(ot.artist)
+                val currentCnt = artistCounts.getOrDefault(normArtist, 0)
+                val limit = if (isSeedArtist(ot.artist)) maxPerArtist * 2 else hardMaxPerNonSeedArtist
+                if (currentCnt < limit) {
+                    diverseSelection.add(ot)
+                    artistCounts[normArtist] = currentCnt + 1
+                }
             }
 
             // 7. Final Selection & Quota Shortage Check
