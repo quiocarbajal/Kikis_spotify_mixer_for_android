@@ -8,6 +8,7 @@ import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import com.kiki.spotifymixer.data.repository.SpotifyMixerRepository
+import com.kiki.spotifymixer.domain.SearchUtils
 import com.kiki.spotifymixer.util.KikiLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -80,6 +81,19 @@ private fun JsonObject.getArrayOrNull(key: String): JsonArray? {
 class SpotifyCloudService(
     private val repository: SpotifyMixerRepository
 ) {
+
+    companion object {
+        /**
+         * Sanitizes search queries by removing characters that break Lucene syntax
+         * such as !, ?, *, +, ~, ^, (, ), {, }, [, ], :, ", \.
+         */
+        fun sanitizeQuery(raw: String): String {
+            if (raw.isBlank()) return ""
+            return raw.replace(Regex("[!*?~^(){}\\[\\]:\"]"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -1027,13 +1041,238 @@ class SpotifyCloudService(
     }
 
     /**
+     * Fetches genuine genre tags for an artist from their Spotify Artist profile.
+     * (e.g. "León Gieco" -> ["argentine rock", "folklore argentino", "nueva cancion", "rock nacional"])
+     */
+    suspend fun fetchArtistGenres(accessToken: String, artistName: String): List<String> = withContext(Dispatchers.IO) {
+        val genres = mutableListOf<String>()
+        try {
+            val sanitized = sanitizeQuery(artistName)
+            if (sanitized.isBlank()) return@withContext emptyList()
+            val encoded = java.net.URLEncoder.encode(sanitized, "UTF-8")
+            val url = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=3"
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
+            var request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyList()
+            }
+
+            val body = response.body?.string() ?: "{}"
+            response.close()
+
+            val json = JsonParser.parseString(body).asJsonObject
+            val artistsObj = json.getObjectOrNull("artists") ?: return@withContext emptyList()
+            val items = artistsObj.getArrayOrNull("items") ?: return@withContext emptyList()
+
+            var targetArtistObj: JsonObject? = null
+            val normTarget = com.kiki.spotifymixer.domain.SearchUtils.normalize(artistName)
+            for (i in 0 until items.size()) {
+                val a = items.get(i)?.asJsonObject ?: continue
+                val name = a.getStringOrNull("name") ?: continue
+                if (com.kiki.spotifymixer.domain.SearchUtils.normalize(name) == normTarget) {
+                    targetArtistObj = a
+                    break
+                }
+            }
+            if (targetArtistObj == null && items.size() > 0) {
+                targetArtistObj = items.get(0)?.asJsonObject
+            }
+
+            val genresArray = targetArtistObj?.getArrayOrNull("genres")
+            if (genresArray != null) {
+                for (j in 0 until genresArray.size()) {
+                    val g = genresArray.get(j)?.asString
+                    if (!g.isNullOrBlank() && !genres.contains(g)) {
+                        genres.add(g)
+                    }
+                }
+            }
+            KikiLog.d("fetchArtistGenres: artist='$artistName' found genres=$genres")
+        } catch (e: Exception) {
+            KikiLog.e("fetchArtistGenres error for $artistName", e)
+        }
+        genres
+    }
+
+    /**
+     * Searches Spotify for public/editorial playlists matching a query keyword (e.g. artist name).
+     */
+    suspend fun searchPlaylists(accessToken: String, query: String, limit: Int = 4): List<String> = withContext(Dispatchers.IO) {
+        val playlistIds = mutableListOf<String>()
+        try {
+            val sanitized = sanitizeQuery(query)
+            if (sanitized.isBlank()) return@withContext emptyList()
+            val encoded = java.net.URLEncoder.encode(sanitized, "UTF-8")
+            val url = "https://api.spotify.com/v1/search?type=playlist&q=$encoded&limit=$limit"
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
+            var request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyList()
+            }
+
+            val body = response.body?.string() ?: "{}"
+            response.close()
+
+            val json = JsonParser.parseString(body).asJsonObject
+            val playlistsObj = json.getObjectOrNull("playlists") ?: return@withContext emptyList()
+            val items = playlistsObj.getArrayOrNull("items") ?: return@withContext emptyList()
+
+            for (i in 0 until items.size()) {
+                val p = items.get(i)?.asJsonObject ?: continue
+                val id = p.getStringOrNull("id") ?: continue
+                if (!playlistIds.contains(id)) {
+                    playlistIds.add(id)
+                }
+            }
+            KikiLog.d("searchPlaylists: query='$query' found ${playlistIds.size} playlists")
+        } catch (e: Exception) {
+            KikiLog.e("searchPlaylists error for $query", e)
+        }
+        playlistIds
+    }
+
+    /**
+     * Fetches a sample batch of tracks from a Spotify playlist for discovery harvesting,
+     * without modifying local database playlist tables.
+     */
+    suspend fun fetchPlaylistSampleTracks(
+        accessToken: String,
+        playlistId: String,
+        limit: Int = 20
+    ): List<TrackEntity> = withContext(Dispatchers.IO) {
+        val tracks = mutableListOf<TrackEntity>()
+        try {
+            val safeLimit = limit.coerceIn(1, 50)
+            val url = "https://api.spotify.com/v1/playlists/$playlistId/items?limit=$safeLimit"
+            var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
+            var request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $currentToken")
+                .get()
+                .build()
+
+            var response = httpClient.newCall(request).execute()
+            if (response.code == 401) {
+                response.close()
+                val refreshed = refreshAndSaveToken()
+                if (!refreshed.isNullOrBlank()) {
+                    currentToken = refreshed
+                    request = Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer $currentToken")
+                        .get()
+                        .build()
+                    response = httpClient.newCall(request).execute()
+                }
+            }
+
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext emptyList()
+            }
+
+            val body = response.body?.string() ?: "{}"
+            response.close()
+
+            val json = JsonParser.parseString(body).asJsonObject
+            val items = json.getArrayOrNull("items") ?: return@withContext emptyList()
+            for (i in 0 until items.size()) {
+                val itemElem = items.get(i)?.asJsonObject ?: continue
+                val trackObj = itemElem.getObjectOrNull("item") ?: itemElem.getObjectOrNull("track") ?: continue
+
+                val id = trackObj.getStringOrNull("id") ?: continue
+                val name = trackObj.getStringOrNull("name") ?: "Unknown Track"
+                val uri = trackObj.getStringOrNull("uri") ?: "spotify:track:$id"
+                val duration = trackObj.getLongOrNull("duration_ms") ?: 0L
+
+                val artistsArray = trackObj.getArrayOrNull("artists")
+                val artistName = if (artistsArray != null && artistsArray.size() > 0) {
+                    val names = mutableListOf<String>()
+                    for (j in 0 until artistsArray.size()) {
+                        val aElem = artistsArray.get(j)?.asJsonObject
+                        val aName = aElem?.getStringOrNull("name")
+                        if (!aName.isNullOrBlank()) names.add(aName)
+                    }
+                    if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
+                } else "Unknown Artist"
+
+                val albumObj = trackObj.getObjectOrNull("album")
+                val albumName = albumObj?.getStringOrNull("name") ?: "Unknown Album"
+                val images = albumObj?.getArrayOrNull("images")
+                val imgUrl = if (images != null && images.size() > 0) {
+                    images.get(0)?.asJsonObject?.getStringOrNull("url")
+                } else null
+
+                tracks.add(
+                    TrackEntity(
+                        id = id,
+                        title = name,
+                        artist = artistName,
+                        album = albumName,
+                        durationMs = duration,
+                        uri = uri,
+                        albumArtUrl = imgUrl
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            KikiLog.e("fetchPlaylistSampleTracks error for $playlistId", e)
+        }
+        tracks
+    }
+
+    /**
      * Discovers similar & related artists via Spotify catalog search (matching macOS app logic).
      * Bypasses Spotify's restricted/deprecated /v1/artists/{id}/related-artists endpoint.
      */
     suspend fun fetchRelatedArtists(accessToken: String, artistName: String): List<String> = withContext(Dispatchers.IO) {
         val list = mutableListOf<String>()
         try {
-            val encoded = java.net.URLEncoder.encode(artistName, "UTF-8")
+            val sanitized = sanitizeQuery(artistName)
+            if (sanitized.isBlank()) return@withContext emptyList()
+            val encoded = java.net.URLEncoder.encode(sanitized, "UTF-8")
             val url = "https://api.spotify.com/v1/search?type=artist&q=$encoded&limit=6"
             var currentToken = getValidToken(accessToken) ?: return@withContext emptyList()
             var request = Request.Builder()
@@ -1069,10 +1308,34 @@ class SpotifyCloudService(
             val artistsObj = json.getObjectOrNull("artists") ?: return@withContext emptyList()
             val items = artistsObj.getArrayOrNull("items") ?: return@withContext emptyList()
 
+            var seedGenres = emptySet<String>()
+            if (items.size() > 0) {
+                val first = items.get(0)?.asJsonObject
+                val firstName = first?.getStringOrNull("name")
+                if (firstName != null && (firstName.equals(artistName, ignoreCase = true) || SearchUtils.fuzzyMatches(artistName, firstName))) {
+                    val gArr = first.getArrayOrNull("genres")
+                    if (gArr != null) {
+                        seedGenres = (0 until gArr.size()).mapNotNull { gArr.get(it)?.asString?.lowercase()?.trim() }.toSet()
+                    }
+                }
+            }
+
             for (i in 0 until items.size()) {
                 val a = items.get(i)?.asJsonObject ?: continue
                 val name = a.getStringOrNull("name") ?: continue
-                if (!name.equals(artistName, ignoreCase = true) && !list.contains(name)) {
+                // Reject self and homonyms/substitutions
+                if (name.equals(artistName, ignoreCase = true) || SearchUtils.fuzzyMatches(artistName, name)) continue
+
+                // If seed artist has genres, require at least one shared genre or genre keyword
+                if (seedGenres.isNotEmpty()) {
+                    val aGenres = a.getArrayOrNull("genres")?.let { arr ->
+                        (0 until arr.size()).mapNotNull { arr.get(it)?.asString?.lowercase()?.trim() }.toSet()
+                    } ?: emptySet()
+                    val hasGenreOverlap = aGenres.any { ag -> seedGenres.any { sg -> ag == sg || ag.contains(sg) || sg.contains(ag) } }
+                    if (!hasGenreOverlap) continue
+                }
+
+                if (!list.contains(name)) {
                     list.add(name)
                 }
             }
