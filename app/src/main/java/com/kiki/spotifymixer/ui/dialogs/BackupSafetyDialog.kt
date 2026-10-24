@@ -72,7 +72,7 @@ fun BackupSafetyDialog(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "Hemos generado un respaldo completo de tu cuenta de Spotify:\n• $totalLikedTracks canciones que te gustan\n• $totalPlaylists playlists completas",
+                    text = "Hemos generado un respaldo completo de tu cuenta de Spotify:\n• $totalLikedTracks canciones que te gustan\n• $totalPlaylists playlists",
                     color = TextSecondary,
                     fontSize = 14.sp,
                     textAlign = TextAlign.Center,

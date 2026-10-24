@@ -36,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +68,7 @@ fun LibraryScreen(
     duplicateCount: Int,
     onSyncLibrary: () -> Unit,
     onTriggerBackup: () -> Unit = {},
+    onDismissBackupSuggestion: () -> Unit = {},
     onOpenBlacklist: () -> Unit = {},
     onSelectPlaylistAsQueue: (PlaylistEntity) -> Unit,
     onAppendPlaylistToQueue: (PlaylistEntity) -> Unit,
@@ -148,6 +150,34 @@ fun LibraryScreen(
                         color = StatusError,
                         modifier = Modifier.weight(1f)
                     )
+                }
+            }
+        }
+
+        if (state.backupSuggestion != null && !state.isSyncing) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BgSurface2),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "🛡️ ${state.backupSuggestion}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onDismissBackupSuggestion) {
+                            Text("Ahora no", color = TextSecondary)
+                        }
+                        TextButton(onClick = onTriggerBackup) {
+                            Text("Respaldar ahora", color = SpotifyGreen, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }

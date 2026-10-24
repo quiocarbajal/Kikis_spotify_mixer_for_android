@@ -9,3 +9,6 @@
 .cxx
 local.properties
 app/build/
+
+# Scratch folder for local files (backups, exports)
+/tmp/

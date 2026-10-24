@@ -348,6 +348,7 @@ fun AppScaffold(
                     duplicateCount = duplicateTracks.size,
                     onSyncLibrary = { libraryViewModel.syncLibrary(onNeedAuth = onConnectSpotify) },
                     onTriggerBackup = { libraryViewModel.triggerManualBackup(onNeedAuth = onConnectSpotify) },
+                    onDismissBackupSuggestion = { libraryViewModel.dismissBackupSuggestion() },
                     onOpenBlacklist = { isBlacklistDialogOpen = true },
                     onSelectPlaylistAsQueue = { playlist ->
                         queueViewModel.loadPlaylistIntoQueue(playlist.id, playlist.name)

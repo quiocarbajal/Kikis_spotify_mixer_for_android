@@ -30,7 +30,9 @@ data class LibraryUiState(
     val showBackupSafetyDialog: Boolean = false,
     val backupFile: File? = null,
     val backupLikedCount: Int = 0,
-    val backupPlaylistCount: Int = 0
+    val backupPlaylistCount: Int = 0,
+    // Shown after a sync when the library has drifted from the latest backup
+    val backupSuggestion: String? = null
 )
 
 class LibraryViewModel(
@@ -130,12 +132,16 @@ class LibraryViewModel(
         }
     }
 
+    fun dismissBackupSuggestion() {
+        _uiState.update { it.copy(backupSuggestion = null) }
+    }
+
     fun dismissBackupSafetyDialog() {
         _uiState.update { it.copy(showBackupSafetyDialog = false) }
     }
 
     fun createShareBackupIntent(): Intent? {
-        val file = _uiState.value.backupFile ?: backupManager?.getInitialBackupFile() ?: return null
+        val file = _uiState.value.backupFile ?: backupManager?.getLatestBackupFile() ?: return null
         return backupManager?.createShareBackupIntent(file)
     }
 
@@ -150,27 +156,12 @@ class LibraryViewModel(
                 return@launch
             }
 
-            // If backup already exists, just show the dialog to share/save it!
-            val existingFile = backupManager.getInitialBackupFile()
-            if (existingFile != null && existingFile.length() > 0) {
-                val likedCount = repository.getTrackCountForPlaylist("liked_songs").stateIn(viewModelScope).value
-                val playlistsCount = repository.allPlaylists.stateIn(viewModelScope).value.size
-                _uiState.update {
-                    it.copy(
-                        backupFile = existingFile,
-                        backupLikedCount = likedCount,
-                        backupPlaylistCount = playlistsCount,
-                        showBackupSafetyDialog = true
-                    )
-                }
-                return@launch
-            }
-
             _uiState.update {
                 it.copy(
                     isSyncing = true,
                     syncProgress = 0.05f,
-                    syncStage = "🛡️ Creando respaldo de seguridad inicial..."
+                    syncStage = "🛡️ Creando respaldo de seguridad...",
+                    errorMessage = null
                 )
             }
 
@@ -184,16 +175,15 @@ class LibraryViewModel(
             }
 
             if (result.isSuccess) {
-                val file = result.getOrThrow()
-                val likedCount = repository.getTrackCountForPlaylist("liked_songs").stateIn(viewModelScope).value
-                val playlistsCount = repository.allPlaylists.stateIn(viewModelScope).value.size
+                val summary = result.getOrThrow()
                 _uiState.update {
                     it.copy(
                         isSyncing = false,
                         syncStage = "",
-                        backupFile = file,
-                        backupLikedCount = likedCount,
-                        backupPlaylistCount = playlistsCount,
+                        backupFile = summary.file,
+                        backupLikedCount = summary.likedCount,
+                        backupPlaylistCount = summary.playlistCount,
+                        backupSuggestion = null,
                         showBackupSafetyDialog = true
                     )
                 }
@@ -230,57 +220,19 @@ class LibraryViewModel(
                 )
             }
 
-            // Check if safety backup is needed (first-time backup)
-            val hasBackup = backupManager?.hasInitialBackup() == true
-            if (!hasBackup && backupManager != null) {
-                _uiState.update {
-                    it.copy(
-                        syncStage = "🛡️ Creando respaldo de seguridad inicial..."
-                    )
-                }
-
-                val backupResult = backupManager.createFullSafetyBackup(token) { progress, status ->
-                    _uiState.update {
-                        it.copy(
-                            syncProgress = progress * 0.5f,
-                            syncStage = status
-                        )
-                    }
-                }
-
-                if (backupResult.isSuccess) {
-                    val file = backupResult.getOrThrow()
-                    val likedCount = repository.getTrackCountForPlaylist("liked_songs").stateIn(viewModelScope).value
-                    val playlistsCount = repository.allPlaylists.stateIn(viewModelScope).value.size
-
-                    _uiState.update {
-                        it.copy(
-                            backupFile = file,
-                            backupLikedCount = likedCount,
-                            backupPlaylistCount = playlistsCount
-                        )
-                    }
-                }
-            }
-
             val result = cloudService.syncLibrary(token) { progress, stage ->
-                val adjustedProgress = if (!hasBackup) 0.5f + (progress * 0.5f) else progress
                 _uiState.update {
-                    it.copy(syncProgress = adjustedProgress, syncStage = stage)
+                    it.copy(syncProgress = progress, syncStage = stage)
                 }
             }
 
             if (result.isSuccess) {
-                val currentLiked = repository.getTrackCountForPlaylist("liked_songs").stateIn(viewModelScope).value
-                val currentPlaylists = repository.allPlaylists.stateIn(viewModelScope).value.size
-
+                val suggestion = backupManager?.checkBackupDrift()
                 _uiState.update {
                     it.copy(
                         syncProgress = 1.0f,
                         syncStage = "Sincronización completa",
-                        showBackupSafetyDialog = (!hasBackup && backupManager != null),
-                        backupLikedCount = if (it.backupLikedCount == 0) currentLiked else it.backupLikedCount,
-                        backupPlaylistCount = if (it.backupPlaylistCount == 0) currentPlaylists else it.backupPlaylistCount
+                        backupSuggestion = suggestion
                     )
                 }
                 delay(1200L)

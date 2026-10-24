@@ -171,6 +171,11 @@ class SpotifyMixerRepository(private val db: AppDatabase) {
             settingDao.getSetting(key)
         }
 
+    suspend fun getAllSettings(): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            settingDao.getAllSettings().associate { it.key to it.value }
+        }
+
     fun observeSetting(key: String): Flow<String?> =
         settingDao.observeSetting(key)
 

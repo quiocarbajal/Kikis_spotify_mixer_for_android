@@ -134,12 +134,29 @@ The only writes this app makes to Spotify: like/unlike, create playlist, replace
 - Catalog Search: no filtering. Optionally sink blacklisted artists to the bottom with a stable sort. The Block button there gets visible feedback.
 - Remove the unused blacklist helpers.
 
-**Phase 1 — Backup (your priority)**
-- Use the `/items` endpoint and read `item ?: track`.
-- Any failed page fails the whole backup; retry on 401 and 429.
-- Write a new timestamped file on every run.
-- Show the "backup ready" dialog only on success.
-- Include local-only data (blacklist, custom playlists, non-secret settings) so the file can later be restored.
+**Phase 1 — Backup (your priority)** — *built, partly tested, paused (2026-10-24)*
+
+Priorities: (1) never lose Liked Songs, (2) the app should feel fast.
+
+Done (uncommitted, installed on phone):
+- Backup is manual only (button in Library); the share sheet opens only after a successful manual backup.
+- Strict fetching: any failed page fails the whole backup; 401 → refresh once, 429 → wait `Retry-After`, network/5xx → 2 retries. Playlists read from `/items`. Written to a temp file, then renamed.
+- Compact zipped format (`kiki_backup_v3_<timestamp>.zip`, ~59 KB for 1,407 liked songs):
+  one `songs` table (ID, title, artist); liked songs and each owned playlist store `order` (Spotify's order, as song indexes),
+  plus `added_order` (oldest first) and `app_order` (order saved in the app) only when they differ. `added_order_reversed: true` means `order` is exactly newest-first.
+  Followed playlists: ID only. Also stores the artist blacklist and non-secret settings (no tokens).
+- Drift check after each sync: compares the local library with the latest backup and suggests a new one when >10 liked songs changed, a playlist was added or removed, or no backup exists.
+- Old v1 `.json` backups (which had empty playlists) are ignored, not deleted.
+
+Tested: manual backup → shared via WhatsApp → zip opens, contents complete.
+Not verified: the drift note never showed for the user. It is an inline card on the Library tab only, so it may simply have been missed.
+
+Next:
+- Show the drift alert as a pop-up on whatever screen the user is on, with "Back up now", "Not now" and "Don't show again".
+- Then confirm it appears (no backup yet / >10 liked changes) and doesn't appear right after a backup.
+- `app_order` for liked songs stays equal to Spotify's until sync stops resetting the local liked order (see speed work below).
+- Later: restore from a backup file (not needed yet — the list is the safety net). Spotify's current like endpoint can't set the original date, and songs in one batch may share a timestamp, so restore may need to like songs one at a time to keep the order.
+- Speed: open from the local cache instead of a full sync on every start; incremental sync (skip playlists whose snapshot didn't change) that keeps the in-app orders.
 
 **Phase 2 — Protect Spotify playlists from bad overwrites**
 - `REPLACE` → `@Upsert` (C1/C2): the cascade corrupts the local playlist cache that the queue loads from.
