@@ -12,3 +12,7 @@ Whenever project credits, README banners, release notes, or public documentation
 ## Git Commits and Pushing
 - Do NOT perform git commits or git push commands unless explicitly requested to do so by the user. Keep changes unstaged/working-tree only until user approval or explicit prompt.
 
+## Development Workflow: Write → Test → Commit (Anti-Bulk Protocol)
+@[Write-Test-Commit Rule](/Users/quio/Documents/antigravity/_shared_rules/write-test-commit-rule.md)
+
+
