@@ -1,5 +1,6 @@
 package com.kiki.spotifymixer.domain
 
+import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import java.text.Normalizer
 import kotlin.math.abs
 import kotlin.math.max
@@ -214,5 +215,45 @@ object SearchUtils {
         val parts = trimmed.split(delimiterRegex).map { it.trim() }.filter { it.isNotBlank() }
 
         return (listOf(trimmed) + parts).distinct()
+    }
+
+    /**
+     * Strips featured-artist credits from an artist string without splitting band names:
+     * "&", "and", "," and "/" stay because they belong to names like "Simon & Garfunkel",
+     * "Tyler, The Creator" or "AC/DC".
+     * Example: "Daft Punk feat. Pharrell Williams" -> "Daft Punk"
+     * Example: "Simon & Garfunkel" -> "Simon & Garfunkel"
+     */
+    fun getPrimaryArtist(rawArtist: String): String {
+        val trimmed = rawArtist.trim()
+        if (trimmed.isEmpty()) return ""
+        val delimiterRegex = Regex(";|\\s+(?:feat\\.?|ft\\.?|featuring)\\s+", RegexOption.IGNORE_CASE)
+        val parts = trimmed.split(delimiterRegex).map { it.trim() }.filter { it.isNotBlank() }
+        return parts.firstOrNull() ?: trimmed
+    }
+
+    /**
+     * Lead artist of a track: Spotify's artists[0] when known, otherwise the artist string
+     * with featured credits stripped.
+     */
+    fun primaryArtistOf(track: TrackEntity): String =
+        track.primaryArtist?.ifBlank { null } ?: getPrimaryArtist(track.artist)
+
+    /**
+     * Checks if a blacklisted name is the track's lead artist (featured guests are allowed).
+     * Uses normalized, accent-insensitive and case-insensitive comparison.
+     * Rows without a Spotify primary artist store every credit joined by ", ", so a
+     * blacklisted name followed by ", " at the start of that string also counts as the lead.
+     */
+    fun isBlacklistedMainArtist(track: TrackEntity, blacklistedNames: Set<String>): Boolean {
+        if (blacklistedNames.isEmpty()) return false
+        val normPrimary = normalize(primaryArtistOf(track))
+        if (normPrimary.isEmpty()) return false
+        val normJoined = if (track.primaryArtist.isNullOrBlank()) normalize(track.artist) else null
+        return blacklistedNames.any { blocked ->
+            val normBlocked = normalize(blocked)
+            normBlocked.isNotEmpty() &&
+                (normPrimary == normBlocked || normJoined?.startsWith("$normBlocked, ") == true)
+        }
     }
 }

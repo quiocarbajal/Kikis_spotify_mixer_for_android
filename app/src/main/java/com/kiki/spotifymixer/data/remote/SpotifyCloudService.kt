@@ -155,6 +155,7 @@ class SpotifyCloudService(
                                 allExistedOnPage = false
                             }
 
+                            var primaryArtistName: String? = null
                             val artistsArray = trackObj.getArrayOrNull("artists")
                             val artistName = if (artistsArray != null && artistsArray.size() > 0) {
                                 val names = mutableListOf<String>()
@@ -165,6 +166,7 @@ class SpotifyCloudService(
                                         if (!aName.isNullOrBlank()) names.add(aName)
                                     }
                                 }
+                                primaryArtistName = names.firstOrNull()
                                 if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                             } else "Unknown Artist"
 
@@ -183,6 +185,7 @@ class SpotifyCloudService(
                                 uri = uri,
                                 title = title,
                                 artist = artistName,
+                                primaryArtist = primaryArtistName,
                                 album = albumName,
                                 albumArtUrl = artUrl,
                                 durationMs = durationMs
@@ -341,6 +344,7 @@ class SpotifyCloudService(
                         val uri = track.getStringOrNull("uri") ?: "spotify:track:$id"
                         val duration = track.getLongOrNull("duration_ms") ?: 0L
 
+                        var primaryArtistName: String? = null
                         val artistsArray = track.getArrayOrNull("artists")
                         val artistName = if (artistsArray != null && artistsArray.size() > 0) {
                             val names = mutableListOf<String>()
@@ -351,6 +355,7 @@ class SpotifyCloudService(
                                     if (!aName.isNullOrBlank()) names.add(aName)
                                 }
                             }
+                            primaryArtistName = names.firstOrNull()
                             if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                         } else "Unknown Artist"
 
@@ -366,6 +371,7 @@ class SpotifyCloudService(
                             id = id,
                             title = name,
                             artist = artistName,
+                            primaryArtist = primaryArtistName,
                             album = albumName,
                             durationMs = duration,
                             uri = uri,
@@ -511,6 +517,7 @@ class SpotifyCloudService(
                     durationMs = itemObj.getLongOrNull("duration_ms") ?: 0L
                     val uri = itemObj.getStringOrNull("uri") ?: ""
 
+                    var primaryArtistName: String? = null
                     val artists = itemObj.getArrayOrNull("artists")
                     val artistName = if (artists != null && artists.size() > 0) {
                         val names = mutableListOf<String>()
@@ -519,6 +526,7 @@ class SpotifyCloudService(
                             val an = a?.getStringOrNull("name")
                             if (!an.isNullOrBlank()) names.add(an)
                         }
+                        primaryArtistName = names.firstOrNull()
                         if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                     } else "Unknown Artist"
 
@@ -534,6 +542,7 @@ class SpotifyCloudService(
                             id = id,
                             title = name,
                             artist = artistName,
+                            primaryArtist = primaryArtistName,
                             album = albumName,
                             durationMs = durationMs,
                             uri = uri,
@@ -803,6 +812,7 @@ class SpotifyCloudService(
                 val uri = t.getStringOrNull("uri") ?: "spotify:track:$id"
                 val duration = t.getLongOrNull("duration_ms") ?: 0L
 
+                var primaryArtistName: String? = null
                 val artists = t.getArrayOrNull("artists")
                 val artistName = if (artists != null && artists.size() > 0) {
                     val names = mutableListOf<String>()
@@ -811,6 +821,7 @@ class SpotifyCloudService(
                         val an = a?.getStringOrNull("name")
                         if (!an.isNullOrBlank()) names.add(an)
                     }
+                    primaryArtistName = names.firstOrNull()
                     if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                 } else "Unknown Artist"
 
@@ -826,6 +837,7 @@ class SpotifyCloudService(
                         id = id,
                         title = name,
                         artist = artistName,
+                        primaryArtist = primaryArtistName,
                         album = albumName,
                         durationMs = duration,
                         uri = uri,
@@ -1227,6 +1239,7 @@ class SpotifyCloudService(
                 val uri = trackObj.getStringOrNull("uri") ?: "spotify:track:$id"
                 val duration = trackObj.getLongOrNull("duration_ms") ?: 0L
 
+                var primaryArtistName: String? = null
                 val artistsArray = trackObj.getArrayOrNull("artists")
                 val artistName = if (artistsArray != null && artistsArray.size() > 0) {
                     val names = mutableListOf<String>()
@@ -1235,6 +1248,7 @@ class SpotifyCloudService(
                         val aName = aElem?.getStringOrNull("name")
                         if (!aName.isNullOrBlank()) names.add(aName)
                     }
+                    primaryArtistName = names.firstOrNull()
                     if (names.isNotEmpty()) names.joinToString(", ") else "Unknown Artist"
                 } else "Unknown Artist"
 
@@ -1250,6 +1264,7 @@ class SpotifyCloudService(
                         id = id,
                         title = name,
                         artist = artistName,
+                        primaryArtist = primaryArtistName,
                         album = albumName,
                         durationMs = duration,
                         uri = uri,

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kiki.spotifymixer.auth.SpotifyPkceAuthManager
 import com.kiki.spotifymixer.data.backup.LibraryBackupManager
+import com.kiki.spotifymixer.data.local.entity.ArtistBlacklistEntity
 import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import com.kiki.spotifymixer.data.remote.SpotifyCloudService
@@ -57,6 +58,25 @@ class LibraryViewModel(
 
     val duplicateTracks: StateFlow<List<TrackEntity>> = repository.getDuplicateTracks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val blacklistedArtists: StateFlow<List<ArtistBlacklistEntity>> = repository.blacklistedArtists
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val blacklistedCount: StateFlow<Int> = repository.blacklistedCount
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    fun addArtistToBlacklist(name: String) {
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            repository.addArtistToBlacklist(name)
+        }
+    }
+
+    fun removeArtistFromBlacklist(entity: ArtistBlacklistEntity) {
+        viewModelScope.launch {
+            repository.removeArtistFromBlacklistById(entity.id)
+        }
+    }
 
     init {
         viewModelScope.launch {

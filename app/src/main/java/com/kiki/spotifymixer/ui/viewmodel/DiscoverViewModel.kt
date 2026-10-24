@@ -79,7 +79,8 @@ data class DiscoverUiState(
     val hiddenGemTarget: String = "artist", // "artist", "track", "both"
     val isGeneratingMix: Boolean = false,
     val discoveredMix: List<TrackEntity> = emptyList(),
-    val infoBannerMessage: String? = null
+    val infoBannerMessage: String? = null,
+    val blacklistedArtists: Set<String> = emptySet()
 )
 
 class DiscoverViewModel(
@@ -89,6 +90,14 @@ class DiscoverViewModel(
 
     private val _uiState = MutableStateFlow(DiscoverUiState())
     val uiState: StateFlow<DiscoverUiState> = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.blacklistedArtists.collect { list ->
+                _uiState.update { it.copy(blacklistedArtists = list.map { e -> e.name }.toSet()) }
+            }
+        }
+    }
 
     private val allKnownArtists = listOf(
         "Soda Stereo", "Gustavo Cerati", "Charly García", "León Gieco", "Los Enanitos Verdes", "Luis Alberto Spinetta",
@@ -727,7 +736,7 @@ class DiscoverViewModel(
             val hasPositiveSeeds = includedArtists.isNotEmpty() || includedGenres.isNotEmpty() ||
                     includedTracks.isNotEmpty() || state.selectedDecades.isNotEmpty()
 
-            // Pre-load library tracks and recently heard exclusion sets
+            // Pre-load library tracks, recently heard exclusion sets, and artist blacklist
             val libraryTracks = withContext(Dispatchers.IO) { repository.getAllTracksSync() }
             val libraryTrackIds = if (state.excludeLibrarySongs) {
                 libraryTracks.map { it.id.lowercase().trim() }.toSet()
@@ -735,6 +744,8 @@ class DiscoverViewModel(
             val libraryKeys = if (state.excludeLibrarySongs) {
                 libraryTracks.map { "${it.title.lowercase().trim()} - ${it.artist.lowercase().trim()}" }.toSet()
             } else emptySet()
+
+            val blacklistedArtistNames = state.blacklistedArtists
 
             val recentTrackIds: Set<String> = if (state.recentlyHeardFilter != RecentlyHeardFilter.NONE) {
                 val localRecentIds = withContext(Dispatchers.IO) {
@@ -765,6 +776,11 @@ class DiscoverViewModel(
 
                 // Strictly enforce Recently Heard Exclusion
                 if (recentTrackIds.contains(track.id)) return false
+
+                // Strict Artist Blacklist Filter:
+                // Strictly applies ONLY if the blacklisted artist is the primary/main artist.
+                // Collaborations where the blacklisted artist is only a featured guest are allowed.
+                if (SearchUtils.isBlacklistedMainArtist(track, blacklistedArtistNames)) return false
 
                 // Hard Prune: EXCLUDED artists (- NO)
                 if (excludedArtists.isNotEmpty()) {
@@ -832,6 +848,7 @@ class DiscoverViewModel(
             // B. Cloud Seeding with Iterative / Recursive Orbit Expansion (Depth 0 -> 1 -> 2)
             val visitedArtists = mutableSetOf<String>()
             for (a in excludedArtists) visitedArtists.add(a.lowercase().trim())
+            for (b in blacklistedArtistNames) visitedArtists.add(b.lowercase().trim())
 
             withContext(Dispatchers.IO) {
                 if (!token.isNullOrBlank() && cloudService != null) {
@@ -1090,13 +1107,10 @@ class DiscoverViewModel(
             // Non-seed / related artists are strictly capped at at most 2 tracks tops
             val hardMaxPerNonSeedArtist = 2
 
-            fun getPrimaryArtist(raw: String): String {
-                val parts = SearchUtils.splitArtists(raw)
-                return if (parts.size > 1) parts[1].lowercase().trim() else raw.lowercase().trim()
-            }
+            fun capKey(t: TrackEntity): String = SearchUtils.normalize(SearchUtils.primaryArtistOf(t))
 
             for (t in workingPool) {
-                val normArtist = getPrimaryArtist(t.artist)
+                val normArtist = capKey(t)
                 val cnt = artistCounts.getOrDefault(normArtist, 0)
                 val initialLimit = if (isSeedArtist(t.artist)) maxPerArtist else hardMaxPerNonSeedArtist
                 if (cnt < initialLimit) {
@@ -1109,7 +1123,7 @@ class DiscoverViewModel(
 
             for (ot in overflowTracks) {
                 if (diverseSelection.size >= targetCount) break
-                val normArtist = getPrimaryArtist(ot.artist)
+                val normArtist = capKey(ot)
                 val currentCnt = artistCounts.getOrDefault(normArtist, 0)
                 val limit = if (isSeedArtist(ot.artist)) maxPerArtist * 2 else hardMaxPerNonSeedArtist
                 if (currentCnt < limit) {
@@ -1132,13 +1146,36 @@ class DiscoverViewModel(
             // 8. True Shuffle with Anti-Clumping
             val shuffled = ShuffleEngine.shuffleTracks(finalTracks, avoidConsecutiveArtists = true)
 
+            // Re-check against the live blacklist so an artist blocked mid-generation stays out
             _uiState.update {
                 it.copy(
                     isGeneratingMix = false,
-                    discoveredMix = shuffled,
+                    discoveredMix = shuffled.filterNot { t -> SearchUtils.isBlacklistedMainArtist(t, it.blacklistedArtists) },
                     infoBannerMessage = finalNotice
                 )
             }
+        }
+    }
+
+    /**
+     * 1-Click Block Artist action:
+     * Adds the primary artist to the persistent blacklist and purges tracks they lead from the mix.
+     * The live blacklist is updated right away so a mix still generating also drops them.
+     * Catalog Search results are never filtered; the screen shows its own feedback there.
+     */
+    fun blockArtist(track: TrackEntity) {
+        val primary = SearchUtils.primaryArtistOf(track)
+        if (primary.isBlank()) return
+        _uiState.update { current ->
+            val blacklist = current.blacklistedArtists + primary
+            current.copy(
+                blacklistedArtists = blacklist,
+                discoveredMix = current.discoveredMix.filterNot { SearchUtils.isBlacklistedMainArtist(it, blacklist) },
+                infoBannerMessage = if (current.activeSubTab == 0) Strings.ToastArtistBlocked.format(primary) else current.infoBannerMessage
+            )
+        }
+        viewModelScope.launch {
+            repository.addArtistToBlacklist(primary)
         }
     }
 }

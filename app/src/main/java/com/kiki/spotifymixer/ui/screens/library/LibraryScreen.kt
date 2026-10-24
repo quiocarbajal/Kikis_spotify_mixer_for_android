@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
@@ -62,9 +63,11 @@ fun LibraryScreen(
     playlists: List<PlaylistEntity>,
     totalTrackCount: Int,
     likedSongsCount: Int,
+    blacklistedCount: Int = 0,
     duplicateCount: Int,
     onSyncLibrary: () -> Unit,
     onTriggerBackup: () -> Unit = {},
+    onOpenBlacklist: () -> Unit = {},
     onSelectPlaylistAsQueue: (PlaylistEntity) -> Unit,
     onAppendPlaylistToQueue: (PlaylistEntity) -> Unit,
     modifier: Modifier = Modifier
@@ -167,6 +170,16 @@ fun LibraryScreen(
                             PlaylistEntity("liked_songs", Strings.LikedSongs, totalTracks = likedSongsCount)
                         )
                     }
+                )
+            }
+
+            item {
+                LibraryCategoryCard(
+                    icon = Icons.Default.Block,
+                    iconTint = Color(0xFFEF5350),
+                    title = Strings.BlacklistTitle,
+                    count = blacklistedCount,
+                    onClick = onOpenBlacklist
                 )
             }
 

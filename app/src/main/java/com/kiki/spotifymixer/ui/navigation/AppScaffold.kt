@@ -83,6 +83,7 @@ fun AppScaffold(
     var selectedTab by remember { mutableIntStateOf(0) }
     var isSettingsOpen by remember { mutableStateOf(false) }
     var isSavePlaylistOpen by remember { mutableStateOf(false) }
+    var isBlacklistDialogOpen by remember { mutableStateOf(false) }
 
     val queueState by queueViewModel.uiState.collectAsState()
     val filteredTracks by queueViewModel.filteredTracks.collectAsState()
@@ -92,6 +93,8 @@ fun AppScaffold(
     val likedSongsCount by libraryViewModel.likedSongsCount.collectAsState()
     val likedTrackIds by libraryViewModel.likedTrackIds.collectAsState()
     val duplicateTracks by libraryViewModel.duplicateTracks.collectAsState()
+    val blacklistedCount by libraryViewModel.blacklistedCount.collectAsState()
+    val blacklistedArtists by libraryViewModel.blacklistedArtists.collectAsState()
     val playerState by playerViewModel.uiState.collectAsState()
     val discoverState by discoverViewModel.uiState.collectAsState()
     val showColdStartBanner by queueViewModel.showColdStartBanner.collectAsState()
@@ -161,7 +164,9 @@ fun AppScaffold(
 
     // Clean back navigation and exit handling
     BackHandler {
-        if (isSettingsOpen) {
+        if (isBlacklistDialogOpen) {
+            isBlacklistDialogOpen = false
+        } else if (isSettingsOpen) {
             isSettingsOpen = false
         } else if (playerState.isExpandedPlayerOpen) {
             playerViewModel.setExpandedPlayerOpen(false)
@@ -339,9 +344,11 @@ fun AppScaffold(
                     playlists = playlists,
                     totalTrackCount = totalTrackCount,
                     likedSongsCount = likedSongsCount,
+                    blacklistedCount = blacklistedCount,
                     duplicateCount = duplicateTracks.size,
                     onSyncLibrary = { libraryViewModel.syncLibrary(onNeedAuth = onConnectSpotify) },
                     onTriggerBackup = { libraryViewModel.triggerManualBackup(onNeedAuth = onConnectSpotify) },
+                    onOpenBlacklist = { isBlacklistDialogOpen = true },
                     onSelectPlaylistAsQueue = { playlist ->
                         queueViewModel.loadPlaylistIntoQueue(playlist.id, playlist.name)
                         selectedTab = 0 // Auto-switch to Queue tab to see loaded tracks
@@ -403,6 +410,7 @@ fun AppScaffold(
                         playerViewModel.saveTrackToLiked(track)
                     },
                     likedTrackIds = likedTrackIds,
+                    onBlockArtist = { track -> discoverViewModel.blockArtist(track) },
                     onSelectCatalogSearchType = { discoverViewModel.setCatalogSearchType(it) },
                     onSelectCatalogOperator = { discoverViewModel.setCatalogOperator(it) },
                     onAddCatalogModifier = { term, mod -> discoverViewModel.addCatalogModifier(term, mod) },
@@ -483,6 +491,16 @@ fun AppScaffold(
             onDismiss = {
                 isSavePlaylistOpen = false
             }
+        )
+    }
+
+    // Artist Blacklist Management Dialog
+    if (isBlacklistDialogOpen) {
+        com.kiki.spotifymixer.ui.dialogs.BlacklistManagementDialog(
+            blacklistedArtists = blacklistedArtists,
+            onAddArtist = { name -> libraryViewModel.addArtistToBlacklist(name) },
+            onRemoveArtist = { entity -> libraryViewModel.removeArtistFromBlacklist(entity) },
+            onDismiss = { isBlacklistDialogOpen = false }
         )
     }
 }

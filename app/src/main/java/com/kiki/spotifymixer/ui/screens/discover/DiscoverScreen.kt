@@ -1,5 +1,6 @@
 package com.kiki.spotifymixer.ui.screens.discover
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import com.kiki.spotifymixer.domain.GenreCatalog
+import com.kiki.spotifymixer.domain.SearchUtils
 import com.kiki.spotifymixer.ui.viewmodel.CatalogSearchType
 import com.kiki.spotifymixer.ui.viewmodel.SearchLogicOperator
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Favorite
@@ -58,11 +61,13 @@ import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -116,6 +121,7 @@ fun DiscoverScreen(
     onPlayTrack: (TrackEntity) -> Unit = {},
     onLikeTrack: (TrackEntity) -> Unit = {},
     likedTrackIds: Set<String> = emptySet(),
+    onBlockArtist: (TrackEntity) -> Unit = {},
     onSelectCatalogSearchType: (CatalogSearchType) -> Unit = {},
     onSelectCatalogOperator: (SearchLogicOperator) -> Unit = {},
     onAddCatalogModifier: (String, ChipModifier) -> Unit = { _, _ -> },
@@ -209,6 +215,7 @@ fun DiscoverScreen(
                 onAddTrack = onAddTrackToQueue,
                 onLikeTrack = onLikeTrack,
                 likedTrackIds = likedTrackIds,
+                onBlockArtist = onBlockArtist,
                 onDismissInfoBanner = onDismissInfoBanner
             )
         } else {
@@ -225,7 +232,8 @@ fun DiscoverScreen(
                 onAddTrack = onAddTrackToQueue,
                 onPlayTrack = onPlayTrack,
                 onLikeTrack = onLikeTrack,
-                likedTrackIds = likedTrackIds
+                likedTrackIds = likedTrackIds,
+                onBlockArtist = onBlockArtist
             )
         }
     }
@@ -245,10 +253,16 @@ fun CatalogSearchContent(
     onAddTrack: (TrackEntity) -> Unit,
     onPlayTrack: (TrackEntity) -> Unit = {},
     onLikeTrack: (TrackEntity) -> Unit = {},
-    likedTrackIds: Set<String> = emptySet()
+    likedTrackIds: Set<String> = emptySet(),
+    onBlockArtist: (TrackEntity) -> Unit = {}
 ) {
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+    // Catalog Search never hides blocked artists; it only sinks them to the bottom (stable sort)
+    val orderedResults = remember(results, state.blacklistedArtists) {
+        results.sortedBy { SearchUtils.isBlacklistedMainArtist(it, state.blacklistedArtists) }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Filter Pills: 3 pills (Artista, Canción, Letra) + Todo
@@ -463,20 +477,32 @@ fun CatalogSearchContent(
             }
         } else {
             Text(
-                text = "Resultados (${results.size})",
+                text = "Resultados (${orderedResults.size})",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
                 color = TextSecondary,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(results, key = { it.id }) { track ->
+                items(orderedResults, key = { it.id }) { track ->
+                    val isBlocked = SearchUtils.isBlacklistedMainArtist(track, state.blacklistedArtists)
                     DiscoveredTrackRow(
                         track = track,
                         onPlay = { onPlayTrack(track) },
                         onAdd = { onAddTrack(track) },
                         onLike = { onLikeTrack(track) },
-                        isLiked = likedTrackIds.contains(track.id)
+                        onBlockArtist = {
+                            if (!isBlocked) {
+                                onBlockArtist(track)
+                                Toast.makeText(
+                                    context,
+                                    Strings.ToastArtistBlocked.format(SearchUtils.primaryArtistOf(track)),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        isLiked = likedTrackIds.contains(track.id),
+                        isArtistBlocked = isBlocked
                     )
                 }
             }
@@ -513,6 +539,7 @@ fun SurpriseMeContent(
     onAddTrack: (TrackEntity) -> Unit,
     onLikeTrack: (TrackEntity) -> Unit = {},
     likedTrackIds: Set<String> = emptySet(),
+    onBlockArtist: (TrackEntity) -> Unit = {},
     onDismissInfoBanner: () -> Unit = {}
 ) {
     val decades = listOf("60s", "70s", "80s", "90s", "00s", "10s")
@@ -1325,6 +1352,7 @@ fun SurpriseMeContent(
                     onPlay = { onPlayTrack(track) },
                     onAdd = { onAddTrack(track) },
                     onLike = { onLikeTrack(track) },
+                    onBlockArtist = { onBlockArtist(track) },
                     isLiked = likedTrackIds.contains(track.id)
                 )
             }
@@ -1338,7 +1366,9 @@ fun DiscoveredTrackRow(
     onPlay: () -> Unit = {},
     onAdd: () -> Unit = {},
     onLike: () -> Unit = {},
-    isLiked: Boolean = false
+    onBlockArtist: () -> Unit = {},
+    isLiked: Boolean = false,
+    isArtistBlocked: Boolean = false
 ) {
     Card(
         modifier = Modifier
@@ -1391,7 +1421,7 @@ fun DiscoveredTrackRow(
                 )
             }
 
-            // Single Play Action + Heart Action + Add to Queue
+            // Single Play Action + Heart Action + Add to Queue + Block Artist
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onLike) {
                     Icon(
@@ -1415,6 +1445,14 @@ fun DiscoveredTrackRow(
                         contentDescription = Strings.BtnAddToQueue,
                         tint = TextSecondary,
                         modifier = Modifier.size(22.dp)
+                    )
+                }
+                IconButton(onClick = onBlockArtist) {
+                    Icon(
+                        imageVector = Icons.Default.Block,
+                        contentDescription = Strings.TooltipBlockArtist,
+                        tint = if (isArtistBlocked) Color(0xFFEF5350) else TextMuted,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }

@@ -70,4 +70,14 @@ object Strings {
     const val ColdStartBody = "Para la primera reproducción solamente, la pantalla cambiará a Spotify. Simplemente vuelve a Kiki's Mixer una vez que comience la música — todas las siguientes canciones y mezclas se reproducirán sin interrupciones aquí."
     const val ColdStartDoNotShow = "No volver a mostrar"
     const val ColdStartUnderstood = "Entendido"
+
+    // Artist Blacklist
+    const val BlacklistTitle = "Artistas Bloqueados"
+    const val BlacklistSubtitle = "Artistas excluidos de Sorpréndeme"
+    const val BlacklistEmptyNotice = "No tienes artistas bloqueados.\nLos artistas que bloquees nunca aparecerán como artista principal en Sorpréndeme."
+    const val BtnUnblockArtist = "Desbloquear"
+    const val ArtistInputPlaceholderBlock = "Escribe un artista para bloquear..."
+    const val ToastArtistBlocked = "🚫 Artista '%s' bloqueado de Sorpréndeme"
+    const val TooltipBlockArtist = "Bloquear artista"
+    const val DialogClose = "Cerrar"
 }

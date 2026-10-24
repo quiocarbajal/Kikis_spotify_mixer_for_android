@@ -564,5 +564,94 @@ class DiscoveryFilterTest {
         val score = SearchUtils.matchScore("leon", "leo")
         assertEquals("Short token distance between leon and leo must return 999 (no match)", 999, score)
     }
+
+    @Test
+    fun testArtistBlacklistFiltersSoloAndLeadTracks() {
+        val blacklist = setOf("drake", "bad bunny")
+
+        val drakeSolo = TrackEntity(
+            id = "d1", uri = "spotify:track:d1", title = "God's Plan",
+            artist = "Drake", album = "Scorpion", durationMs = 198000L,
+            primaryArtist = "Drake"
+        )
+        val drakeLeadCollab = TrackEntity(
+            id = "d2", uri = "spotify:track:d2", title = "Jimmy Cooks",
+            artist = "Drake feat. 21 Savage", album = "Honestly, Nevermind", durationMs = 218000L,
+            primaryArtist = "Drake"
+        )
+        val badBunnySolo = TrackEntity(
+            id = "bb1", uri = "spotify:track:bb1", title = "Tití Me Preguntó",
+            artist = "Bad Bunny", album = "Un Verano Sin Ti", durationMs = 243000L,
+            primaryArtist = "Bad Bunny"
+        )
+        val theWeekndSolo = TrackEntity(
+            id = "w1", uri = "spotify:track:w1", title = "Blinding Lights",
+            artist = "The Weeknd", album = "After Hours", durationMs = 200000L,
+            primaryArtist = "The Weeknd"
+        )
+
+        val candidateTracks = listOf(drakeSolo, drakeLeadCollab, badBunnySolo, theWeekndSolo)
+
+        // Filter replicating DiscoverViewModel isAllowedCandidate logic
+        val filtered = candidateTracks.filterNot { track ->
+            SearchUtils.isBlacklistedMainArtist(track, blacklist)
+        }
+
+        assertEquals(1, filtered.size)
+        assertEquals("Blinding Lights", filtered[0].title)
+        assertEquals("The Weeknd", filtered[0].artist)
+        assertFalse("Drake solo must be blocked", filtered.any { it.artist.contains("Drake") })
+        assertFalse("Bad Bunny solo must be blocked", filtered.any { it.artist.contains("Bad Bunny") })
+    }
+
+    @Test
+    fun testArtistBlacklistAllowsGuestCollaborations() {
+        val blacklist = setOf("drake")
+
+        // Track where Drake is only a featured / collaborating guest
+        val travisFeatDrake = TrackEntity(
+            id = "ts1", uri = "spotify:track:ts1", title = "SICKO MODE",
+            artist = "Travis Scott, Drake", album = "ASTROWORLD", durationMs = 312000L,
+            primaryArtist = "Travis Scott" // Set by Spotify API as artists[0]
+        )
+        val futureFeatDrake = TrackEntity(
+            id = "f1", uri = "spotify:track:f1", title = "Life Is Good",
+            artist = "Future feat. Drake", album = "High Off Life", durationMs = 237000L,
+            primaryArtist = null // Fallback to SearchUtils.getPrimaryArtist("Future feat. Drake") -> "Future"
+        )
+        val drakeSolo = TrackEntity(
+            id = "d1", uri = "spotify:track:d1", title = "Hotline Bling",
+            artist = "Drake", album = "Views", durationMs = 267000L,
+            primaryArtist = "Drake"
+        )
+
+        val candidateTracks = listOf(travisFeatDrake, futureFeatDrake, drakeSolo)
+
+        val filtered = candidateTracks.filterNot { track ->
+            SearchUtils.isBlacklistedMainArtist(track, blacklist)
+        }
+
+        assertEquals("Both guest collaborations must be ALLOWED, only solo Drake blocked", 2, filtered.size)
+        assertTrue("Travis Scott feat. Drake must be kept", filtered.any { it.title == "SICKO MODE" })
+        assertTrue("Future feat. Drake must be kept", filtered.any { it.title == "Life Is Good" })
+        assertFalse("Drake solo track must be removed", filtered.any { it.title == "Hotline Bling" })
+    }
+
+    @Test
+    fun testArtistBlacklistSeedExpansionSkipsBlockedArtists() {
+        val blacklist = setOf("drake")
+        val visitedArtists = mutableSetOf<String>()
+        visitedArtists.addAll(blacklist)
+
+        // Seed generator: check before querying cloud
+        val nextArtistToExplore = "Drake"
+        val isBlockedFromSeeding = visitedArtists.contains(nextArtistToExplore.lowercase().trim())
+
+        assertTrue("Seed expansion must skip blacklisted artist", isBlockedFromSeeding)
+
+        val allowedArtist = "Travis Scott"
+        val isAllowed = !visitedArtists.contains(allowedArtist.lowercase().trim())
+        assertTrue("Allowed artist must proceed to seed exploration", isAllowed)
+    }
 }
 

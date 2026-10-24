@@ -1,5 +1,6 @@
 package com.kiki.spotifymixer.domain
 
+import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -101,4 +102,64 @@ class SearchUtilsTest {
         assertTrue(feat.contains("Charly García"))
         assertTrue(feat.contains("Pedro Aznar"))
     }
+
+    @Test
+    fun testGetPrimaryArtist() {
+        assertEquals("Drake", SearchUtils.getPrimaryArtist("Drake feat. 21 Savage"))
+        assertEquals("Calvin Harris", SearchUtils.getPrimaryArtist("Calvin Harris ft. Rihanna"))
+        assertEquals("Daft Punk", SearchUtils.getPrimaryArtist("Daft Punk featuring Pharrell Williams"))
+        assertEquals("Daft Punk", SearchUtils.getPrimaryArtist("Daft Punk"))
+        // Band names must not be split
+        assertEquals("Simon & Garfunkel", SearchUtils.getPrimaryArtist("Simon & Garfunkel"))
+        assertEquals("Tyler, The Creator", SearchUtils.getPrimaryArtist("Tyler, The Creator"))
+        assertEquals("AC/DC", SearchUtils.getPrimaryArtist("AC/DC"))
+        assertEquals("Earth, Wind & Fire", SearchUtils.getPrimaryArtist("Earth, Wind & Fire"))
+    }
+
+    @Test
+    fun testPrimaryArtistOfPrefersSpotifyValue() {
+        val withSpotify = track(artist = "Tyler, The Creator, Kali Uchis", primaryArtist = "Tyler, The Creator")
+        assertEquals("Tyler, The Creator", SearchUtils.primaryArtistOf(withSpotify))
+        val legacy = track(artist = "Future feat. Drake", primaryArtist = null)
+        assertEquals("Future", SearchUtils.primaryArtistOf(legacy))
+    }
+
+    @Test
+    fun testIsBlacklistedMainArtist() {
+        val blacklist = setOf("Drake", "Bad Bunny")
+
+        assertTrue("Solo Drake track must be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Drake", "Drake"), blacklist))
+        assertTrue("Collab with Drake as lead must be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Drake, 21 Savage", "Drake"), blacklist))
+        assertFalse("Collab with Drake only as guest must NOT be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Travis Scott, Drake", "Travis Scott"), blacklist))
+
+        // Legacy rows without a Spotify primary artist: lead is the first ", "-joined credit
+        assertTrue("Legacy row led by Drake must be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Drake, 21 Savage", null), blacklist))
+        assertFalse("Legacy row with Drake as guest must NOT be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Travis Scott, Drake", null), blacklist))
+        assertFalse("Legacy feat. credit with Drake as guest must NOT be blocked",
+            SearchUtils.isBlacklistedMainArtist(track("Future feat. Drake", null), blacklist))
+
+        // Band names stay whole
+        val bands = setOf("Simon & Garfunkel", "Tyler, The Creator")
+        assertTrue(SearchUtils.isBlacklistedMainArtist(track("Simon & Garfunkel", "Simon & Garfunkel"), bands))
+        assertTrue(SearchUtils.isBlacklistedMainArtist(track("Tyler, The Creator", null), bands))
+        assertFalse("Blocking a band must not block a member's solo name",
+            SearchUtils.isBlacklistedMainArtist(track("Paul Simon", "Paul Simon"), bands))
+
+        // Diacritics and casing tolerance
+        val latinBlacklist = setOf("leon gieco")
+        assertTrue("Diacritics must match normalized blacklist entry",
+            SearchUtils.isBlacklistedMainArtist(track("León Gieco", "León Gieco"), latinBlacklist))
+        assertFalse("Unrelated artist must not match",
+            SearchUtils.isBlacklistedMainArtist(track("Charly García", "Charly García"), latinBlacklist))
+    }
+
+    private fun track(artist: String, primaryArtist: String?) = TrackEntity(
+        id = "t", uri = "spotify:track:t", title = "Song", artist = artist, album = "Album",
+        durationMs = 0L, primaryArtist = primaryArtist
+    )
 }

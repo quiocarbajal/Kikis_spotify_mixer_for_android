@@ -1,6 +1,7 @@
 package com.kiki.spotifymixer.data.repository
 
 import com.kiki.spotifymixer.data.local.AppDatabase
+import com.kiki.spotifymixer.data.local.entity.ArtistBlacklistEntity
 import com.kiki.spotifymixer.data.local.entity.PlaylistEntity
 import com.kiki.spotifymixer.data.local.entity.TrackEntity
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ class SpotifyMixerRepository(private val db: AppDatabase) {
     private val playlistTrackDao = db.playlistTrackDao()
     private val settingDao = db.settingDao()
     private val playbackHistoryDao = db.playbackHistoryDao()
+    private val artistBlacklistDao = db.artistBlacklistDao()
 
     val likedTrackIds: Flow<Set<String>> =
         playlistTrackDao.getLikedTrackIdsFlow().map { it.toSet() }
@@ -189,6 +191,25 @@ class SpotifyMixerRepository(private val db: AppDatabase) {
             playbackHistoryDao.getRecentlyPlayedTrackIds(since)
         }
 
+    // --- Artist Blacklist ---
+    val blacklistedArtists: Flow<List<ArtistBlacklistEntity>> =
+        artistBlacklistDao.getAllBlacklistedFlow()
+
+    val blacklistedCount: Flow<Int> =
+        artistBlacklistDao.getBlacklistCountFlow()
+
+    suspend fun addArtistToBlacklist(name: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val cleanName = name.trim()
+            if (cleanName.isBlank()) return@withContext false
+            artistBlacklistDao.insert(ArtistBlacklistEntity(name = cleanName)) > 0
+        }
+
+    suspend fun removeArtistFromBlacklistById(id: Long): Boolean =
+        withContext(Dispatchers.IO) {
+            artistBlacklistDao.deleteById(id) > 0
+        }
+
     // --- Wipe / Reset ---
     suspend fun clearAllData() =
         withContext(Dispatchers.IO) {
@@ -196,5 +217,6 @@ class SpotifyMixerRepository(private val db: AppDatabase) {
             trackDao.clearAllTracks()
             playlistDao.clearAllPlaylists()
             playbackHistoryDao.clearHistory()
+            artistBlacklistDao.clearAll()
         }
 }

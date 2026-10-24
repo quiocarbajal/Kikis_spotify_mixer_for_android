@@ -40,5 +40,8 @@ data class TrackEntity(
     val isHiddenGem: Boolean = false,
 
     @ColumnInfo(name = "hidden_gem_type")
-    val hiddenGemType: String? = null
+    val hiddenGemType: String? = null,
+
+    @ColumnInfo(name = "primary_artist")
+    val primaryArtist: String? = null
 )
